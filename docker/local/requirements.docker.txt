@@ -8,3 +8,6 @@ alphalens==0.4.0
 
 # Upstream required qanotify>=0.1.0, but PyPI latest is 0.0.2
 qanotify==0.0.2
+
+# Data source
+tushare>=1.4.0

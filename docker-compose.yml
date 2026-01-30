@@ -68,6 +68,7 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-quantaxis}
       PYTHONUNBUFFERED: 1
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import QUANTAXIS; print('OK')"]
       interval: 10s
