@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p output
+
+# Run baseline backtests and write versioned reports under output/reports/<run_id>/
+# Usage:
+#   ./scripts/run_baseline_backtest.sh 20190101 20241231 all xsec_momentum_weekly_topk 60 10 60 10
+#   ./scripts/run_baseline_backtest.sh 20190101 20241231 all ts_ma_weekly 60 10 60 10
 
 CONTAINER=quantaxis-core
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -12,30 +16,30 @@ fi
 START=${1:-20190101}
 END=${2:-20241231}
 THEME=${3:-all}
-LOOKBACK=${4:-60}
-TOPK=${5:-10}
-COST_BPS=${6:-10}
+STRATEGY=${4:-xsec_momentum_weekly_topk}
+LOOKBACK=${5:-60}
+TOPK=${6:-10}
+MA=${7:-60}
+COST_BPS=${8:-10}
 
-cat > /tmp/qa_baseline.py <<'PY'
-# placeholder; will be overwritten by docker cp from repo script
-PY
+TS=$(date +%Y%m%d-%H%M%S)
+RUN_ID="${TS}_${STRATEGY}_theme=${THEME}_lb=${LOOKBACK}_top=${TOPK}_ma=${MA}_cost=${COST_BPS}_${START}-${END}"
+OUTDIR_HOST="output/reports/${RUN_ID}"
+mkdir -p "$OUTDIR_HOST"
 
-# Copy the repo script into container
-# (We do docker cp to avoid depending on bind mounts)
+# Copy script into container
+
 docker cp scripts/backtest_baseline.py ${CONTAINER}:/tmp/backtest_baseline.py
 
-# Run inside container
-# Note: Mongo creds are already in container env; root creds are also present via compose.
 docker exec ${CONTAINER} python /tmp/backtest_baseline.py \
-  --start "$START" --end "$END" --theme "$THEME" \
-  --lookback "$LOOKBACK" --top "$TOPK" --cost-bps "$COST_BPS" \
-  --outdir /tmp/output | tee output/baseline_console.txt
+  --start "$START" --end "$END" --theme "$THEME" --strategy "$STRATEGY" \
+  --lookback "$LOOKBACK" --top "$TOPK" --ma "$MA" --cost-bps "$COST_BPS" \
+  --outdir /tmp/output | tee "${OUTDIR_HOST}/console.txt"
 
 # Copy artifacts back
-rm -f output/baseline_metrics.json output/baseline_equity.csv output/baseline_positions.csv || true
 
-docker cp ${CONTAINER}:/tmp/output/baseline_metrics.json output/baseline_metrics.json
-docker cp ${CONTAINER}:/tmp/output/baseline_equity.csv output/baseline_equity.csv
-docker cp ${CONTAINER}:/tmp/output/baseline_positions.csv output/baseline_positions.csv
+docker cp ${CONTAINER}:/tmp/output/metrics.json "${OUTDIR_HOST}/metrics.json"
+docker cp ${CONTAINER}:/tmp/output/equity.csv "${OUTDIR_HOST}/equity.csv"
+docker cp ${CONTAINER}:/tmp/output/positions.csv "${OUTDIR_HOST}/positions.csv"
 
-echo "[baseline] wrote output/baseline_metrics.json + baseline_equity.csv + baseline_positions.csv"
+echo "[baseline] wrote ${OUTDIR_HOST}/metrics.json + equity.csv + positions.csv"
