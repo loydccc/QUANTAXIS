@@ -18,9 +18,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# This demo is designed to be stable/reproducible without external data sources.
-# It generates OHLCV sample data for 1 A-share symbol and 1 US symbol, writes to Mongo,
-# then runs a minimal moving-average crossover backtest and outputs metrics + results.
+# This demo prefers real market data if present in Mongo (stock_day from TDX fetch).
+# If not enough real data exists, it falls back to generating synthetic OHLCV data.
+# Then it runs a minimal moving-average crossover backtest and outputs metrics + results.
 
 # Mongo connection from env (compose sets these)
 MONGO_HOST = os.getenv('MONGODB_HOST', 'mongodb')
@@ -72,31 +72,49 @@ def gen_ohlcv(symbol, start='2020-01-01', end='2020-12-31'):
     })
     return df
 
-# collections
+# Prefer real data from QUANTAXIS stock_day (written by TDX pipeline)
+REAL = db['stock_day']
+REAL.create_index([('code', 1), ('date', 1)], unique=True)
+
+# Fallback collection for synthetic demo
 COLL = db['demo_ohlcv']
 COLL.create_index([('code', 1), ('date', 1)], unique=True)
 
-symbols = [('000001', 'CN'), ('AAPL', 'US')]
+# Choose a few representative codes from our seed universe if present; else use 000001.
+seed_candidates = ['300308','600406','600893','688012','688981','000977','300124','600089']
+real_symbols = []
+for c in seed_candidates:
+    if REAL.find_one({'code': c}):
+        real_symbols.append(c)
 
-for sym, mkt in symbols:
-    df = gen_ohlcv(sym)
-    # upsert
-    ops = []
-    for row in df.to_dict('records'):
-        ops.append(pymongo.UpdateOne({'code': row['code'], 'date': row['date']}, {'$set': {**row, 'market': mkt}}, upsert=True))
-    if ops:
-        res = COLL.bulk_write(ops, ordered=False)
-        print(f"Inserted/updated {sym}: upserted={res.upserted_count} modified={res.modified_count}")
+if not real_symbols:
+    real_symbols = ['000001']
+
+# Load real bars into pandas
+
+def load_real(sym: str):
+    cursor = REAL.find({'code': sym}).sort('date', 1)
+    df = pd.DataFrame(list(cursor))
+    if df.empty:
+        return None
+    # normalize schema
+    df['date'] = pd.to_datetime(df['date'])
+    # TDX fetcher stores vol/amount; synthetic uses volume
+    if 'volume' not in df.columns:
+        df['volume'] = df.get('vol')
+    for col in ['open','high','low','close','volume']:
+        if col not in df.columns:
+            df[col] = np.nan
+    df = df[['date','open','high','low','close','volume']].dropna(subset=['close']).sort_values('date')
+    # ensure enough bars
+    if len(df) < 60:
+        return None
+    return df
 
 # load back for one symbol and run MA crossover
 
-def ma_backtest(sym, fast=5, slow=20):
-    cursor = COLL.find({'code': sym}).sort('date', 1)
-    df = pd.DataFrame(list(cursor))
-    if df.empty:
-        raise RuntimeError(f"no data for {sym}")
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date')
+def ma_backtest_df(df: pd.DataFrame, sym: str, fast=5, slow=20):
+    df = df.copy()
     df['fast'] = df['close'].rolling(fast).mean()
     df['slow'] = df['close'].rolling(slow).mean()
     df['signal'] = (df['fast'] > df['slow']).astype(int)
@@ -106,7 +124,6 @@ def ma_backtest(sym, fast=5, slow=20):
     equity = (1 + df['strategy_ret']).cumprod()
 
     total_return = equity.iloc[-1] - 1
-    # max drawdown
     peak = equity.cummax()
     dd = equity/peak - 1
     max_dd = dd.min()
@@ -127,10 +144,27 @@ def ma_backtest(sym, fast=5, slow=20):
 
 results = []
 all_rows = []
-for sym, _ in symbols:
-    metrics, df_out = ma_backtest(sym)
+
+for sym in real_symbols:
+    df = load_real(sym)
+    source = 'real'
+    if df is None:
+        source = 'synthetic'
+        df = gen_ohlcv(sym, start='2020-01-01', end='2020-12-31')
+        # store synthetic for inspection
+        ops = []
+        for row in df.to_dict('records'):
+            ops.append(pymongo.UpdateOne({'code': row['code'], 'date': row['date']}, {'$set': {**row, 'market': 'CN', 'source': 'synthetic'}}, upsert=True))
+        if ops:
+            COLL.bulk_write(ops, ordered=False)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df[['date','open','high','low','close','volume']].sort_values('date')
+
+    metrics, df_out = ma_backtest_df(df, sym)
+    metrics['data_source'] = source
     results.append(metrics)
     df_out['symbol'] = sym
+    df_out['data_source'] = source
     all_rows.append(df_out)
 
 metrics_text = "\n".join([
