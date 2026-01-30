@@ -9,13 +9,8 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
   exit 1
 fi
 
-docker exec \
-  -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
-  -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
-  ${CONTAINER} \
-  python - <<'PY'
+cat > /tmp/qa_verify.py <<'PY'
 import os
-import random
 import pymongo
 
 host=os.getenv('MONGODB_HOST','mongodb')
@@ -46,17 +41,29 @@ if client is None:
 db=client[dbname]
 coll=db['stock_day']
 
-n=coll.estimated_document_count()
-print('stock_day estimated_count=', n)
+print('stock_day estimated_count=', coll.estimated_document_count())
 
-sample_codes=coll.aggregate([
+codes=list(coll.aggregate([
     {'$group': {'_id': '$code'}},
     {'$sample': {'size': 3}},
-])
-for row in sample_codes:
+]))
+
+for row in codes:
     code=row['_id']
-    last=coll.find({'code': code}).sort('date',-1).limit(1)
-    last=list(last)
-    if last:
-        print('sample', code, 'last_date=', last[0].get('date'), 'close=', last[0].get('close'))
+    doc=coll.find_one({'code': code}, sort=[('date', -1)])
+    if doc:
+        print('sample', code, 'last_date=', doc.get('date'), 'close=', doc.get('close'), 'source=', doc.get('source'))
+
+# Show a deterministic check too
+last=coll.find_one({'code': '000001'}, sort=[('date', -1)])
+if last:
+    print('last 000001', last.get('date'), last.get('close'), last.get('source'))
 PY
+
+docker cp /tmp/qa_verify.py ${CONTAINER}:/tmp/qa_verify.py
+
+docker exec \
+  -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
+  -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
+  ${CONTAINER} \
+  python /tmp/qa_verify.py
