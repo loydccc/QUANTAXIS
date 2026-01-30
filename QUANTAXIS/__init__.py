@@ -302,9 +302,14 @@ from QUANTAXIS.QAPubSub.base import base_ps
 from QUANTAXIS.QAPubSub.debugtoool import debug_sub, debug_pub
 
 
-from QUANTAXIS.QAWebServer.basehandles import QABaseHandler, QAWebSocketHandler
-from QUANTAXIS.QAWebServer.schedulehandler import QAScheduleQuery, QASchedulerHandler
-from QUANTAXIS.QAWebServer.server import start_server
+# QAWebServer - optional (depends on legacy pyconvert in some modules)
+try:
+    from QUANTAXIS.QAWebServer.basehandles import QABaseHandler, QAWebSocketHandler
+    from QUANTAXIS.QAWebServer.schedulehandler import QAScheduleQuery, QASchedulerHandler
+    from QUANTAXIS.QAWebServer.server import start_server
+except ImportError:
+    # WebServer deps are optional for research/backtest minimal loop
+    pass
 
 from QUANTAXIS.QIFI.QifiAccount import QIFI_Account
 from QUANTAXIS.QIFI.QifiManager import QA_QIFIMANAGER, QA_QIFISMANAGER

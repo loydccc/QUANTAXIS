@@ -1,0 +1,10 @@
+# Docker build requirements for reproducible demo
+# Filter upstream requirements.txt to remove impossible pins, then add compatible pins.
+
+-r /app/docker/local/requirements.base.txt
+
+# Upstream required alphalens>=0.4.3, but PyPI latest is 0.4.0
+alphalens==0.4.0
+
+# Upstream required qanotify>=0.1.0, but PyPI latest is 0.0.2
+qanotify==0.0.2

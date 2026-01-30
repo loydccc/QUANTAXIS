@@ -1,0 +1,81 @@
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: quantaxis-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      TZ: Asia/Shanghai
+      MONGO_INITDB_DATABASE: quantaxis
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - ./docker/qa-service-v2.1/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: quantaxis-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    environment:
+      TZ: Asia/Shanghai
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-quantaxis}
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  quantaxis:
+    build:
+      context: .
+      dockerfile: docker/local/Dockerfile.quantaxis
+    container_name: quantaxis-core
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: 27017
+      MONGODB_USER: ${MONGO_USER:-quantaxis}
+      MONGODB_PASSWORD: ${MONGO_PASSWORD:-quantaxis}
+      MONGODB_DATABASE: quantaxis
+      # also expose root creds to allow one-off maintenance/demo if app user creds mismatch
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-root}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-quantaxis}
+      PYTHONUNBUFFERED: 1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import QUANTAXIS; print('OK')"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+
+volumes:
+  mongodb_data:
+  mongodb_config:
+  redis_data:

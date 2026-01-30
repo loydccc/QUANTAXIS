@@ -202,4 +202,8 @@ celerybeat*
 
 # mdbook构建输出
 book/
+
+# local demo artifacts
+output/
+
 *.bak
