@@ -21,9 +21,10 @@ LOOKBACK=${5:-60}
 TOPK=${6:-10}
 MA=${7:-60}
 COST_BPS=${8:-10}
+MIN_BARS=${9:-252}
 
 TS=$(date +%Y%m%d-%H%M%S)
-RUN_ID="${TS}_${STRATEGY}_theme=${THEME}_lb=${LOOKBACK}_top=${TOPK}_ma=${MA}_cost=${COST_BPS}_${START}-${END}"
+RUN_ID="${TS}_${STRATEGY}_theme=${THEME}_lb=${LOOKBACK}_top=${TOPK}_ma=${MA}_cost=${COST_BPS}_minbars=${MIN_BARS}_${START}-${END}"
 OUTDIR_HOST="output/reports/${RUN_ID}"
 mkdir -p "$OUTDIR_HOST"
 
@@ -33,7 +34,7 @@ docker cp scripts/backtest_baseline.py ${CONTAINER}:/tmp/backtest_baseline.py
 
 docker exec ${CONTAINER} python /tmp/backtest_baseline.py \
   --start "$START" --end "$END" --theme "$THEME" --strategy "$STRATEGY" \
-  --lookback "$LOOKBACK" --top "$TOPK" --ma "$MA" --cost-bps "$COST_BPS" \
+  --lookback "$LOOKBACK" --top "$TOPK" --ma "$MA" --cost-bps "$COST_BPS" --min-bars "$MIN_BARS" \
   --outdir /tmp/output | tee "${OUTDIR_HOST}/console.txt"
 
 # Copy artifacts back

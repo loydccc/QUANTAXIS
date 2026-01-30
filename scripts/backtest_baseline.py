@@ -26,6 +26,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -228,6 +229,26 @@ def norm_date(s: str) -> str:
     raise ValueError(f"bad date: {s}")
 
 
+def universe_fingerprint(codes: List[str], cfg: Dict) -> str:
+    payload = {
+        "codes": codes,
+        "cfg": cfg,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def audit_from_close_panel(close: pd.DataFrame) -> Dict:
+    # basic coverage diagnostics
+    bars_per_code = close.notna().sum(axis=0).astype(int)
+    return {
+        "universe_size_raw": int(close.shape[1]),
+        "bars_min": int(bars_per_code.min()) if len(bars_per_code) else 0,
+        "bars_max": int(bars_per_code.max()) if len(bars_per_code) else 0,
+        "panel_missing_ratio": float(close.isna().sum().sum() / max(close.size, 1)),
+    }
+
+
 def write_outputs(outdir: Path, equity: pd.Series, positions: pd.DataFrame, stats: Dict) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "metrics.json").write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -253,6 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--ma", type=int, default=60)
     ap.add_argument("--cost-bps", type=float, default=10.0)
+    ap.add_argument("--min-bars", type=int, default=252, help="min non-NaN close bars required per code")
     ap.add_argument("--outdir", default="/tmp/output")
     args = ap.parse_args(argv)
 
@@ -265,7 +287,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     db = client[cfg.db]
     coll = db["stock_day"]
 
-    close = fetch_close_panel(coll, codes, start, end).sort_index()
+    close_raw = fetch_close_panel(coll, codes, start, end).sort_index()
+
+    # Universe eligibility: require enough bars to support indicators/weekly rebalance.
+    bars_per_code = close_raw.notna().sum(axis=0).astype(int)
+    eligible = bars_per_code[bars_per_code >= int(args.min_bars)].index.tolist()
+    dropped = sorted(set(close_raw.columns) - set(eligible))
+
+    close = close_raw[eligible]
+
+    if close.shape[1] == 0:
+        raise RuntimeError(f"no eligible codes after min-bars filter={args.min_bars}")
+
     reb_dates = pick_weekly_rebalance_dates(close.index)
 
     if args.strategy == "xsec_momentum_weekly_topk":
@@ -276,20 +309,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     equity, positions, turnover, net_ret = backtest_close_to_close(close, weights, cost_bps=args.cost_bps)
 
     stats = perf_stats(equity, net_ret, turnover)
+    run_cfg = {
+        "strategy": args.strategy,
+        "theme": args.theme,
+        "start": start,
+        "end": end,
+        "min_bars": int(args.min_bars),
+        "cost_bps": float(args.cost_bps),
+        "params": {"lookback": int(args.lookback), "top": int(args.top), "ma": int(args.ma)},
+        "data": {"collection": "stock_day", "price": "close", "adjustment": "none"},
+    }
+
     stats.update(
         {
-            "strategy": args.strategy,
-            "theme": args.theme,
+            **run_cfg,
             "universe_size": int(close.shape[1]),
-            "start": str(close.index.min().date()),
-            "end": str(close.index.max().date()),
-            "cost_bps": args.cost_bps,
-            "data": {"collection": "stock_day", "price": "close", "adjustment": "none"},
-            "params": {
-                "lookback": args.lookback,
-                "top": args.top,
-                "ma": args.ma,
-            },
+            "universe_size_raw": int(close_raw.shape[1]),
+            "universe_dropped": dropped,
+            "universe_fingerprint": universe_fingerprint(sorted(close.columns.tolist()), run_cfg),
+            "data_audit": audit_from_close_panel(close),
+            "start_effective": str(close.index.min().date()),
+            "end_effective": str(close.index.max().date()),
             "generated_at": int(time.time()),
         }
     )
