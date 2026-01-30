@@ -208,7 +208,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     finally:
                         signal.alarm(0)
 
-                    if ok:
+                    # pytdx connect returns self (truthy) on success in some versions
+                    if ok is not None:
                         connected = True
                         print(f"[tdx] connected={ip}:{port}")
                         break

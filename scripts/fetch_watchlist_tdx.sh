@@ -24,27 +24,14 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
 fi
 
 # Generate comma-separated codes from JSON
-CODES=$(python3 - <<'PY'
-import json
-from pathlib import Path
-import sys
-
-start = sys.argv[1]
-end = sys.argv[2]
-theme = sys.argv[3]
-
-p = Path('watchlists/themes_seed_cn.json')
-obj = json.loads(p.read_text(encoding='utf-8'))
-
-codes=set()
+CODES=$(python3 -c "import json; from pathlib import Path; import sys; theme=sys.argv[1]; obj=json.loads(Path('watchlists/themes_seed_cn.json').read_text(encoding='utf-8')); codes=set();
 for t in obj['themes']:
+  
   if theme=='all' or t['theme']==theme:
+    
     for c in t['seed_codes']:
-      codes.add(str(c).zfill(6))
-
-print(','.join(sorted(codes)))
-PY
-"$START" "$END" "$THEME")
+      codes.add(str(c).zfill(6));
+print(','.join(sorted(codes)))" "$THEME")
 
 if [[ -z "$CODES" ]]; then
   echo "[watchlist] No codes found for theme=$THEME" >&2
