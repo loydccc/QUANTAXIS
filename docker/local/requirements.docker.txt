@@ -11,3 +11,4 @@ qanotify==0.0.2
 
 # Data source
 tushare>=1.4.0
+akshare>=1.13.0

@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "version": 1,
+    "intent": "Quant-first theme seeds for CN A-shares. Build Core pool first for mid/low frequency strategies. This file is intentionally small and human-curated; expansion will be generated from data.",
+    "notes": [
+      "Seeds are NOT investment advice; they are a starting universe for data collection and model research.",
+      "Prefer liquid, representative names; avoid microcaps."
+    ]
+  },
+  "themes": [
+    {
+      "theme": "AI_算力_服务器_数据中心",
+      "seed_codes": [
+        "000977",
+        "603019",
+        "000938",
+        "601138",
+        "688041",
+        "688256",
+        "300308",
+        "002281"
+      ],
+      "notes": "Core compute infra + key accelerators/optics proxies; will later expand via correlation/volume screens."
+    },
+    {
+      "theme": "机器人_工业自动化",
+      "seed_codes": [
+        "300124",
+        "002747",
+        "300024",
+        "688017",
+        "002472",
+        "300607",
+        "002527"
+      ],
+      "notes": "Automation & robot chain; includes control + robot OEM + key components."
+    },
+    {
+      "theme": "航天军工",
+      "seed_codes": [
+        "600760",
+        "000768",
+        "600893",
+        "600118",
+        "600879",
+        "002389",
+        "002179"
+      ],
+      "notes": "Aerospace/defense anchors; will later refine with liquidity filter."
+    },
+    {
+      "theme": "电力_电网",
+      "seed_codes": [
+        "600406",
+        "600900",
+        "601985",
+        "600905",
+        "600025"
+      ],
+      "notes": "Power system anchors + grid leader."
+    },
+    {
+      "theme": "输变电_变压器_电气设备",
+      "seed_codes": [
+        "600089",
+        "000400",
+        "600312",
+        "002028",
+        "600550"
+      ],
+      "notes": "Transmission & transformer chain; will later validate by turnover and industry mapping."
+    },
+    {
+      "theme": "半导体",
+      "seed_codes": [
+        "688981",
+        "002371",
+        "688012",
+        "600584",
+        "603501",
+        "603986"
+      ],
+      "notes": "Manufacturing + equipment + design + packaging anchors."
+    },
+    {
+      "theme": "存储_SSD",
+      "seed_codes": [
+        "603986",
+        "688008",
+        "301308",
+        "688525",
+        "300223"
+      ],
+      "notes": "Storage memory and module chain."
+    }
+  ]
+}
