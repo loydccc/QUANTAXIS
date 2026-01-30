@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Baseline backtests (mid/low-frequency) for the CN theme seed universe.
 
-Supports two strategies:
+Supports strategies:
 1) xsec_momentum_weekly_topk: cross-sectional momentum, weekly rebalance, long-only top K equal-weight.
-2) ts_ma_weekly: time-series MA filter per-asset, weekly rebalance, long-only.
+2) xsec_momentum_weekly_invvol: momentum top K, weighted by inverse trailing vol (risk-aware), with max weight cap.
+3) ts_ma_weekly: time-series MA filter per-asset, weekly rebalance, long-only.
 
 Data source:
 - MongoDB collection: stock_day
@@ -152,6 +153,71 @@ def compute_weights_xsec_mom(
     return weights
 
 
+def _cap_and_normalize(w: pd.Series, max_weight: float) -> pd.Series:
+    w = w.clip(lower=0.0)
+    if w.sum() <= 0:
+        return w * 0.0
+    w = w / w.sum()
+    if max_weight is None or max_weight <= 0 or max_weight >= 1:
+        return w
+
+    w = w.copy()
+    for _ in range(10):
+        over = w > max_weight
+        if not over.any():
+            break
+        excess = (w[over] - max_weight).sum()
+        w[over] = max_weight
+        under = w < max_weight
+        if under.sum() == 0:
+            break
+        w[under] = w[under] + excess * (w[under] / w[under].sum())
+    if w.sum() > 0:
+        w = w / w.sum()
+    return w
+
+
+def compute_weights_xsec_mom_invvol(
+    close: pd.DataFrame,
+    rebalance_dates: List[pd.Timestamp],
+    lookback: int,
+    top_k: int,
+    vol_window: int,
+    max_weight: float,
+) -> pd.DataFrame:
+    # Pick winners by momentum; weight by inverse vol.
+    weights = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
+    ret = close.pct_change(fill_method=None)
+    vol = ret.rolling(vol_window).std()
+
+    for d in rebalance_dates:
+        if d not in close.index:
+            continue
+        loc = close.index.get_loc(d)
+        if isinstance(loc, slice):
+            loc = loc.stop - 1
+        if loc < max(lookback, vol_window):
+            continue
+
+        window = close.iloc[loc - lookback : loc + 1]
+        mom = window.iloc[-1] / window.iloc[0] - 1.0
+        mom = mom.dropna()
+        if mom.empty:
+            continue
+        winners = mom.sort_values(ascending=False).head(top_k).index
+
+        inv = (1.0 / (vol.loc[d, winners].replace(0.0, np.nan))).replace([np.inf, -np.inf], np.nan).dropna()
+        if inv.empty:
+            w = pd.Series(0.0, index=close.columns)
+        else:
+            w_sub = _cap_and_normalize(inv, max_weight=max_weight)
+            w = pd.Series(0.0, index=close.columns)
+            w.loc[w_sub.index] = w_sub.values
+        weights.loc[d] = w
+
+    return weights
+
+
 def compute_weights_ts_ma(
     close: pd.DataFrame,
     rebalance_dates: List[pd.Timestamp],
@@ -268,11 +334,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--strategy",
         default="xsec_momentum_weekly_topk",
-        choices=["xsec_momentum_weekly_topk", "ts_ma_weekly"],
+        choices=["xsec_momentum_weekly_topk", "xsec_momentum_weekly_invvol", "ts_ma_weekly"],
     )
     ap.add_argument("--lookback", type=int, default=60)
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--ma", type=int, default=60)
+    ap.add_argument("--vol-window", type=int, default=20, help="trailing trading days for vol weighting")
+    ap.add_argument("--max-weight", type=float, default=0.10, help="max single-asset weight cap")
     ap.add_argument("--cost-bps", type=float, default=10.0)
     ap.add_argument("--min-bars", type=int, default=252, help="min non-NaN close bars required per code")
     ap.add_argument("--outdir", default="/tmp/output")
@@ -303,6 +371,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.strategy == "xsec_momentum_weekly_topk":
         weights = compute_weights_xsec_mom(close, reb_dates, lookback=args.lookback, top_k=args.top)
+    elif args.strategy == "xsec_momentum_weekly_invvol":
+        weights = compute_weights_xsec_mom_invvol(
+            close,
+            reb_dates,
+            lookback=args.lookback,
+            top_k=args.top,
+            vol_window=args.vol_window,
+            max_weight=args.max_weight,
+        )
     else:
         weights = compute_weights_ts_ma(close, reb_dates, ma_window=args.ma)
 
@@ -316,7 +393,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "end": end,
         "min_bars": int(args.min_bars),
         "cost_bps": float(args.cost_bps),
-        "params": {"lookback": int(args.lookback), "top": int(args.top), "ma": int(args.ma)},
+        "params": {
+            "lookback": int(args.lookback),
+            "top": int(args.top),
+            "ma": int(args.ma),
+            "vol_window": int(args.vol_window),
+            "max_weight": float(args.max_weight),
+        },
         "data": {"collection": "stock_day", "price": "close", "adjustment": "none"},
     }
 
