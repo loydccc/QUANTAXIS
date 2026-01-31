@@ -214,3 +214,6 @@ output/
 !output/reports/latest_manifest.json
 
 *.bak
+# Allow tracking small aggregate artifacts (even though *.csv is ignored above)
+!output/reports/latest_strategy_compare.csv
+!output/reports/latest_strategy_compare.md

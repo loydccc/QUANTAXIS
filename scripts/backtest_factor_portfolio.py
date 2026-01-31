@@ -13,12 +13,20 @@ Logic (MVP):
 - Close-to-close returns with T+1 execution (weights shift by 1 day)
 - Transaction cost: cost_bps * turnover
 
-Outputs a report folder compatible with existing report tooling.
+Outputs:
+- metrics.json
+- equity.csv
+- positions.csv
+
+Notes:
+- This is an MVP for productization; future enhancements can add constraints,
+  vol targeting, cash, limit-up/down handling, suspensions, etc.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -29,6 +37,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import pymongo
+
+
+def universe_fingerprint(codes: List[str]) -> str:
+    s = "\n".join(sorted(codes)).encode("utf-8")
+    return hashlib.sha256(s).hexdigest()
 
 
 @dataclass
@@ -72,7 +85,7 @@ def mongo_client(cfg: MongoCfg) -> pymongo.MongoClient:
 
 def norm_date(s: str) -> str:
     s = s.strip()
-    if '-' in s:
+    if "-" in s:
         return s
     if len(s) == 8:
         return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
@@ -80,11 +93,11 @@ def norm_date(s: str) -> str:
 
 
 def load_universe(theme: str) -> List[str]:
-    obj = json.loads(Path('watchlists/themes_seed_cn.json').read_text(encoding='utf-8'))
+    obj = json.loads(Path("watchlists/themes_seed_cn.json").read_text(encoding="utf-8"))
     codes = set()
-    for t in obj['themes']:
-        if theme == 'all' or t['theme'] == theme:
-            for c in t['seed_codes']:
+    for t in obj["themes"]:
+        if theme == "all" or t["theme"] == theme:
+            for c in t["seed_codes"]:
                 codes.add(str(c).zfill(6))
     return sorted(codes)
 
@@ -92,28 +105,31 @@ def load_universe(theme: str) -> List[str]:
 def fetch_close_panel(coll, codes: List[str], start: str, end: str) -> pd.DataFrame:
     series = {}
     for code in codes:
-        cur = coll.find({'code': code, 'date': {'$gte': start, '$lte': end}}, {'_id': 0, 'date': 1, 'close': 1}).sort('date', 1)
+        cur = coll.find(
+            {"code": code, "date": {"$gte": start, "$lte": end}},
+            {"_id": 0, "date": 1, "close": 1},
+        ).sort("date", 1)
         rows = list(cur)
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.dropna(subset=['close']).drop_duplicates(subset=['date']).set_index('date')
-        series[code] = df['close'].astype(float)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.dropna(subset=["close"]).drop_duplicates(subset=["date"]).set_index("date")
+        series[code] = df["close"].astype(float)
     if not series:
-        raise RuntimeError('no data')
+        raise RuntimeError("no data")
     return pd.concat(series, axis=1).sort_index()
 
 
 def rebalance_dates(index: pd.DatetimeIndex, freq: str) -> List[pd.Timestamp]:
     dates = list(index)
-    if freq == 'daily':
+    if freq == "daily":
         return dates
     di = pd.DatetimeIndex(dates)
-    if freq == 'weekly':
-        return di.to_series(index=di).groupby(di.to_period('W-FRI')).max().sort_values().tolist()
-    if freq == 'monthly':
-        return di.to_series(index=di).groupby(di.to_period('M')).max().sort_values().tolist()
+    if freq == "weekly":
+        return di.to_series(index=di).groupby(di.to_period("W-FRI")).max().sort_values().tolist()
+    if freq == "monthly":
+        return di.to_series(index=di).groupby(di.to_period("M")).max().sort_values().tolist()
     raise ValueError(freq)
 
 
@@ -122,6 +138,7 @@ def backtest_close_to_close(
     weights_on_rebalance: pd.DataFrame,
     cost_bps: float,
 ) -> Tuple[pd.Series, pd.DataFrame, pd.Series, pd.Series]:
+    # weights set on rebalance dates; forward-fill; then shift for T+1 execution
     w = weights_on_rebalance.reindex(close.index).ffill().fillna(0.0)
     w_eff = w.shift(1).fillna(0.0)
 
@@ -150,14 +167,14 @@ def perf_stats(equity: pd.Series, net_ret: pd.Series, turnover: pd.Series) -> Di
     turnover_annual = float(turnover.sum() / (n / ann)) if n > 0 else 0.0
 
     return {
-        'bars': int(n),
-        'cagr': cagr,
-        'vol': vol,
-        'sharpe': sharpe,
-        'max_drawdown': max_dd,
-        'final_equity': float(equity.iloc[-1]),
-        'avg_daily_turnover': avg_turnover,
-        'annual_turnover': turnover_annual,
+        "bars": int(n),
+        "cagr": cagr,
+        "vol": vol,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "final_equity": float(equity.iloc[-1]),
+        "avg_daily_turnover": avg_turnover,
+        "annual_turnover": turnover_annual,
     }
 
 
@@ -171,6 +188,7 @@ def compute_weights(
     direction: str,
 ) -> pd.DataFrame:
     weights = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
+
     for d in reb_dates:
         if d not in close.index:
             continue
@@ -178,15 +196,16 @@ def compute_weights(
             x = fac_long.xs(d, level=0)[factor]
         except Exception:
             continue
+
         x = x.replace([np.inf, -np.inf], np.nan).dropna()
         if x.empty:
             continue
 
-        asc = True if direction == 'long_low' else False
+        asc = True if direction == "long_low" else False
 
         if quantile is not None:
             # quantile: for long_high use top tail, for long_low use bottom tail
-            if direction == 'long_low':
+            if direction == "long_low":
                 thr = x.quantile(1.0 - quantile)
                 sel = x[x <= thr].sort_values(ascending=asc).index
             else:
@@ -197,6 +216,7 @@ def compute_weights(
 
         if len(sel) == 0:
             continue
+
         w = pd.Series(0.0, index=close.columns)
         w.loc[sel] = 1.0 / len(sel)
         weights.loc[d] = w
@@ -206,68 +226,75 @@ def compute_weights(
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--start', required=True)
-    ap.add_argument('--end', required=True)
-    ap.add_argument('--theme', default='all')
-    ap.add_argument('--factor-parquet', required=True)
-    ap.add_argument('--factor', required=True)
-    ap.add_argument('--rebalance', choices=['daily','weekly','monthly'], default='weekly')
-    ap.add_argument('--direction', choices=['long_high','long_low'], default='long_high')
-    ap.add_argument('--topk', type=int, default=10)
-    ap.add_argument('--quantile', type=float, default=None, help='if set (0-1), select top quantile instead of topk')
-    ap.add_argument('--cost-bps', type=float, default=10.0)
-    ap.add_argument('--outdir', default='/tmp/output')
+    ap.add_argument("--start", required=True)
+    ap.add_argument("--end", required=True)
+    ap.add_argument("--theme", default="all")
+    ap.add_argument("--factor-parquet", required=True)
+    ap.add_argument("--factor", required=True)
+    ap.add_argument("--rebalance", choices=["daily", "weekly", "monthly"], default="weekly")
+    ap.add_argument("--direction", choices=["long_high", "long_low"], default="long_high")
+    ap.add_argument("--topk", type=int, default=10)
+    ap.add_argument("--quantile", type=float, default=None, help="if set (0-1), select tail quantile instead of topk")
+    ap.add_argument("--cost-bps", type=float, default=10.0)
+    ap.add_argument("--outdir", default="/tmp/output")
     args = ap.parse_args(argv)
 
     start = norm_date(args.start)
     end = norm_date(args.end)
 
     fac = pd.read_parquet(args.factor_parquet)
-    fac['date'] = pd.to_datetime(fac['date'])
-    fac_long = fac.set_index(['date','code']).sort_index()
+    fac["date"] = pd.to_datetime(fac["date"])
+    fac_long = fac.set_index(["date", "code"]).sort_index()
 
     cfg = get_mongo_cfg()
     client = mongo_client(cfg)
-    coll = client[cfg.db]['stock_day']
+    coll = client[cfg.db]["stock_day"]
+
     codes = load_universe(args.theme)
     close = fetch_close_panel(coll, codes, start, end)
 
     reb_dates = rebalance_dates(close.index, args.rebalance)
-    w_on = compute_weights(fac_long, close, reb_dates, args.factor, args.topk, args.quantile, args.direction)
+    w_on = compute_weights(
+        fac_long,
+        close,
+        reb_dates,
+        factor=args.factor,
+        topk=int(args.topk),
+        quantile=args.quantile,
+        direction=args.direction,
+    )
 
     equity, w_eff, turnover, net = backtest_close_to_close(close, w_on, cost_bps=float(args.cost_bps))
     stats = perf_stats(equity, net, turnover)
 
-    start_eff = str(equity.index.min().date())
-    end_eff = str(equity.index.max().date())
-
     metrics = {
         **stats,
-        'start_effective': start_eff,
-        'end_effective': end_eff,
-        'strategy': 'factor_portfolio',
-        'theme': args.theme,
-        'start': start,
-        'end': end,
-        'rebalance': args.rebalance,
-        'factor': args.factor,
-        'direction': args.direction,
-        'topk': int(args.topk),
-        'quantile': args.quantile,
-        'cost_bps': float(args.cost_bps),
-        'generated_at': int(time.time()),
-        'universe_size': int(close.shape[1]),
-        'universe': codes,
+        "strategy": "factor_portfolio",
+        "theme": args.theme,
+        "start": start,
+        "end": end,
+        "start_effective": str(equity.index.min().date()),
+        "end_effective": str(equity.index.max().date()),
+        "rebalance": args.rebalance,
+        "factor": args.factor,
+        "direction": args.direction,
+        "topk": int(args.topk),
+        "quantile": args.quantile,
+        "cost_bps": float(args.cost_bps),
+        "generated_at": int(time.time()),
+        "universe_size": int(close.shape[1]),
+        "universe_fingerprint": universe_fingerprint(codes),
     }
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / 'metrics.json').write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding='utf-8')
-    pd.DataFrame({'date': equity.index, 'equity': equity.values}).to_csv(outdir / 'equity.csv', index=False)
-    w_eff.reset_index().rename(columns={'index':'date'}).to_csv(outdir / 'positions.csv', index=False)
+    (outdir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    pd.DataFrame({"date": equity.index, "equity": equity.values}).to_csv(outdir / "equity.csv", index=False)
+    w_eff.reset_index().rename(columns={"index": "date"}).to_csv(outdir / "positions.csv", index=False)
 
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())
