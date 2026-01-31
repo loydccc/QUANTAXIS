@@ -14,6 +14,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--reports-dir', default='output/reports')
     ap.add_argument('--latest', type=int, default=12)
+    ap.add_argument('--theme', default=None)
+    ap.add_argument('--kind', choices=['all','baseline','factor'], default='all')
     ap.add_argument('--out', default='output/reports/latest_strategy_compare.csv')
     ap.add_argument('--md', default='output/reports/latest_strategy_compare.md')
     args = ap.parse_args()
@@ -28,6 +30,12 @@ def main() -> int:
         if '_factor_bt_' not in name and ('_xsec_momentum_' not in name and '_ts_ma_' not in name):
             continue
         m = json.loads((rpt / 'metrics.json').read_text(encoding='utf-8'))
+        if args.theme is not None and m.get('theme') != args.theme:
+            continue
+        if args.kind == 'baseline' and m.get('strategy') == 'factor_portfolio':
+            continue
+        if args.kind == 'factor' and m.get('strategy') != 'factor_portfolio':
+            continue
         rows.append(
             {
                 'run_id': name,

@@ -238,8 +238,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     equity, w_eff, turnover, net = backtest_close_to_close(close, w_on, cost_bps=float(args.cost_bps))
     stats = perf_stats(equity, net, turnover)
 
+    start_eff = str(equity.index.min().date())
+    end_eff = str(equity.index.max().date())
+
     metrics = {
         **stats,
+        'start_effective': start_eff,
+        'end_effective': end_eff,
         'strategy': 'factor_portfolio',
         'theme': args.theme,
         'start': start,
@@ -251,6 +256,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         'quantile': args.quantile,
         'cost_bps': float(args.cost_bps),
         'generated_at': int(time.time()),
+        'universe_size': int(close.shape[1]),
+        'universe': codes,
     }
 
     outdir = Path(args.outdir)
