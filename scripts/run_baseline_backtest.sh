@@ -49,5 +49,6 @@ docker cp ${CONTAINER}:/tmp/output/positions.csv "${OUTDIR_HOST}/positions.csv"
 
 # Render human-readable summary
 python3 scripts/render_report_summary.py --report "${OUTDIR_HOST}" >/dev/null 2>&1 || true
+python3 scripts/render_report_manifest.py --report "${OUTDIR_HOST}" >/dev/null 2>&1 || true
 
-echo "[baseline] wrote ${OUTDIR_HOST}/metrics.json + equity.csv + positions.csv (+ summary.md)"
+echo "[baseline] wrote ${OUTDIR_HOST}/metrics.json + equity.csv + positions.csv (+ summary.md + manifest.json)"
