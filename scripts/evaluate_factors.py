@@ -169,7 +169,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--theme', default='all')
     ap.add_argument('--factor-parquet', required=True)
     ap.add_argument('--horizon', type=int, default=5, help='forward return horizon in trading days')
-    ap.add_argument('--rebalance', choices=['daily','weekly'], default='daily', help='evaluate only on rebalance dates')
+    ap.add_argument('--rebalance', choices=['daily','weekly','monthly'], default='daily', help='evaluate only on rebalance dates')
     ap.add_argument('--ic-method', choices=['pearson','spearman','both'], default='both')
     ap.add_argument('--quantiles', type=int, default=5)
     ap.add_argument('--outdir', default='/tmp/output')
@@ -200,6 +200,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         di = pd.DatetimeIndex(dates)
         weekly = di.to_series(index=di).groupby(di.to_period('W-FRI')).max().sort_values().tolist()
         dates = [d for d in weekly if d in set(dates)]
+
+    if args.rebalance == 'monthly':
+        di = pd.DatetimeIndex(dates)
+        monthly = di.to_series(index=di).groupby(di.to_period('M')).max().sort_values().tolist()
+        dates = [d for d in monthly if d in set(dates)]
 
     ic_rows = []
     qret_rows = []
