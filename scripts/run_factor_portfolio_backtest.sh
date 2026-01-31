@@ -13,8 +13,9 @@ END=${2:-20241231}
 THEME=${3:-all}
 FACTOR=${4:-mom_60}
 REBALANCE=${5:-weekly}
-TOPK=${6:-10}
-COST_BPS=${7:-10}
+DIRECTION=${6:-long_high}
+TOPK=${7:-10}
+COST_BPS=${8:-10}
 
 LATEST_FACTOR=$(ls -t output/reports 2>/dev/null | grep "factor_mvp_theme=${THEME}_" | head -n 1 || true)
 if [ -z "${LATEST_FACTOR}" ]; then
@@ -23,7 +24,7 @@ if [ -z "${LATEST_FACTOR}" ]; then
 fi
 
 TS=$(date +%Y%m%d-%H%M%S)
-RUN_ID="${TS}_factor_bt_theme=${THEME}_fac=${FACTOR}_reb=${REBALANCE}_top=${TOPK}_cost=${COST_BPS}_${START}-${END}"
+RUN_ID="${TS}_factor_bt_theme=${THEME}_fac=${FACTOR}_reb=${REBALANCE}_dir=${DIRECTION}_top=${TOPK}_cost=${COST_BPS}_${START}-${END}"
 OUTDIR_HOST="output/reports/${RUN_ID}"
 mkdir -p "${OUTDIR_HOST}"
 
@@ -33,7 +34,7 @@ docker cp "${FACTOR_PARQUET_HOST}" ${CONTAINER}:/tmp/factor_zscore.parquet
 
 docker cp scripts/backtest_factor_portfolio.py ${CONTAINER}:/tmp/backtest_factor_portfolio.py
 
-docker exec ${CONTAINER} bash -lc "python /tmp/backtest_factor_portfolio.py --start ${START} --end ${END} --theme '${THEME}' --factor-parquet /tmp/factor_zscore.parquet --factor '${FACTOR}' --rebalance ${REBALANCE} --topk ${TOPK} --cost-bps ${COST_BPS} --outdir /tmp/output" | tee "${OUTDIR_HOST}/console.txt"
+docker exec ${CONTAINER} bash -lc "python /tmp/backtest_factor_portfolio.py --start ${START} --end ${END} --theme '${THEME}' --factor-parquet /tmp/factor_zscore.parquet --factor '${FACTOR}' --rebalance ${REBALANCE} --direction ${DIRECTION} --topk ${TOPK} --cost-bps ${COST_BPS} --outdir /tmp/output" | tee "${OUTDIR_HOST}/console.txt"
 
 docker cp ${CONTAINER}:/tmp/output/metrics.json "${OUTDIR_HOST}/metrics.json"
 docker cp ${CONTAINER}:/tmp/output/equity.csv "${OUTDIR_HOST}/equity.csv"

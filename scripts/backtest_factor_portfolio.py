@@ -168,6 +168,7 @@ def compute_weights(
     factor: str,
     topk: int,
     quantile: Optional[float],
+    direction: str,
 ) -> pd.DataFrame:
     weights = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
     for d in reb_dates:
@@ -181,11 +182,18 @@ def compute_weights(
         if x.empty:
             continue
 
+        asc = True if direction == 'long_low' else False
+
         if quantile is not None:
-            thr = x.quantile(quantile)
-            sel = x[x >= thr].sort_values(ascending=False).index
+            # quantile: for long_high use top tail, for long_low use bottom tail
+            if direction == 'long_low':
+                thr = x.quantile(1.0 - quantile)
+                sel = x[x <= thr].sort_values(ascending=asc).index
+            else:
+                thr = x.quantile(quantile)
+                sel = x[x >= thr].sort_values(ascending=asc).index
         else:
-            sel = x.sort_values(ascending=False).head(topk).index
+            sel = x.sort_values(ascending=asc).head(topk).index
 
         if len(sel) == 0:
             continue
@@ -204,6 +212,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--factor-parquet', required=True)
     ap.add_argument('--factor', required=True)
     ap.add_argument('--rebalance', choices=['daily','weekly','monthly'], default='weekly')
+    ap.add_argument('--direction', choices=['long_high','long_low'], default='long_high')
     ap.add_argument('--topk', type=int, default=10)
     ap.add_argument('--quantile', type=float, default=None, help='if set (0-1), select top quantile instead of topk')
     ap.add_argument('--cost-bps', type=float, default=10.0)
@@ -224,7 +233,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     close = fetch_close_panel(coll, codes, start, end)
 
     reb_dates = rebalance_dates(close.index, args.rebalance)
-    w_on = compute_weights(fac_long, close, reb_dates, args.factor, args.topk, args.quantile)
+    w_on = compute_weights(fac_long, close, reb_dates, args.factor, args.topk, args.quantile, args.direction)
 
     equity, w_eff, turnover, net = backtest_close_to_close(close, w_on, cost_bps=float(args.cost_bps))
     stats = perf_stats(equity, net, turnover)
@@ -237,6 +246,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         'end': end,
         'rebalance': args.rebalance,
         'factor': args.factor,
+        'direction': args.direction,
         'topk': int(args.topk),
         'quantile': args.quantile,
         'cost_bps': float(args.cost_bps),
