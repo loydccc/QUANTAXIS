@@ -1,5 +1,5 @@
 {
-  "generated_at": 1769859742,
+  "generated_at": 1769860184,
   "artifacts": {
     "baseline_compare_csv": {
       "path": "output/reports/latest_compare.csv",
@@ -32,16 +32,16 @@
     "strategy_compare_csv": {
       "path": "output/reports/latest_strategy_compare.csv",
       "exists": true,
-      "bytes": 2895,
-      "sha256": "12348f954a3fc631ccc312bfa13adfad45c71a259e99632be158a9d5df344b9e",
-      "mtime": 1769859742
+      "bytes": 3044,
+      "sha256": "daa0fbd603022a0375dca79096250a40f545d33bbbe63a4a36ef2ec7c4348c12",
+      "mtime": 1769860183
     },
     "strategy_compare_md": {
       "path": "output/reports/latest_strategy_compare.md",
       "exists": true,
-      "bytes": 2084,
-      "sha256": "d3efe2fa195ab26a3cc709bb5f6a8bc47d61e73f3765577461bbf5862b058f6e",
-      "mtime": 1769859742
+      "bytes": 2237,
+      "sha256": "71a8d032911ae6862ed6b9ee35a7d5fc85cf50d0cc5681d2559ead6a0f6e2d23",
+      "mtime": 1769860183
     }
   }
 }

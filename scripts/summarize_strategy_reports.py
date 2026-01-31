@@ -6,8 +6,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List
+
+def cfg_sig(m: dict) -> str:
+    # Stable signature across runs for de-duplication
+    parts = [
+        str(m.get('strategy')),
+        str(m.get('theme')),
+        str(m.get('start_effective') or m.get('start')),
+        str(m.get('end_effective') or m.get('end')),
+        str(m.get('rebalance')),
+        str(m.get('cost_bps')),
+        str(m.get('factor')),
+        str(m.get('direction')),
+        str(m.get('topk')),
+        str(m.get('quantile')),
+        str(m.get('universe_fingerprint')),
+        # baseline params if present
+        str((m.get('params') or {}).get('lookback')) if isinstance(m.get('params'), dict) else '',
+        str((m.get('params') or {}).get('top')) if isinstance(m.get('params'), dict) else '',
+        str((m.get('params') or {}).get('ma')) if isinstance(m.get('params'), dict) else '',
+        str((m.get('params') or {}).get('vol_window')) if isinstance(m.get('params'), dict) else '',
+        str((m.get('params') or {}).get('max_weight')) if isinstance(m.get('params'), dict) else '',
+    ]
+    s = '|'.join(parts).encode('utf-8')
+    return hashlib.sha256(s).hexdigest()[:16]
+
 
 
 def main() -> int:
@@ -18,6 +44,7 @@ def main() -> int:
     ap.add_argument('--kind', choices=['all','baseline','factor'], default='all')
     ap.add_argument('--sort', choices=['mtime','sharpe','cagr','max_dd'], default='mtime')
     ap.add_argument('--top', type=int, default=None, help='if set, keep only top N after sorting')
+    ap.add_argument('--dedup', action='store_true', help='deduplicate by config signature (keep best after sorting)')
     ap.add_argument('--out', default='output/reports/latest_strategy_compare.csv')
     ap.add_argument('--md', default='output/reports/latest_strategy_compare.md')
     args = ap.parse_args()
@@ -56,6 +83,7 @@ def main() -> int:
                 'rebalance': m.get('rebalance'),
                 'topk': m.get('topk'),
                 'cost_bps': m.get('cost_bps'),
+                'cfg_sig': cfg_sig(m),
             }
         )
         if len(rows) >= CAP:
@@ -74,6 +102,17 @@ def main() -> int:
             reverse = True
         rows.sort(key=lambda r: (r.get(key) is None, r.get(key)), reverse=reverse)
 
+
+    if args.dedup:
+        seen = set()
+        deduped = []
+        for r in rows:
+            sig = r.get('cfg_sig')
+            if sig in seen:
+                continue
+            seen.add(sig)
+            deduped.append(r)
+        rows = deduped
     if args.top is not None:
         rows = rows[: int(args.top)]
 
@@ -86,7 +125,7 @@ def main() -> int:
 
     out_csv = Path(args.out)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ['rank','strategy','factor','direction','rebalance','cagr','sharpe','max_dd','final_equity','annual_turnover','theme','start','end','run_id','cost_bps','topk'] if rows else []
+    fieldnames = ['rank','strategy','factor','direction','rebalance','cagr','sharpe','max_dd','final_equity','annual_turnover','theme','start','end','cost_bps','topk','cfg_sig','run_id'] if rows else []
     with out_csv.open('w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         w.writeheader()
@@ -104,12 +143,12 @@ def main() -> int:
     lines = [
         '# Latest strategy compare',
         '',
-        '|rank|strategy|factor|direction|rebalance|cagr|sharpe|max_dd|final_equity|annual_turnover|theme|run_id|',
-        '|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---|',
+        '|rank|strategy|factor|direction|rebalance|cagr|sharpe|max_dd|final_equity|annual_turnover|theme|cfg_sig|run_id|',
+        '|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---|---|',
     ]
     for r in rows:
         lines.append(
-            f"|{r.get('rank','')}|{r['strategy']}|{r.get('factor') or ''}|{r.get('direction') or ''}|{r.get('rebalance') or ''}|{fmt(r['cagr'])}|{fmt(r['sharpe'])}|{fmt(r['max_dd'])}|{fmt(r['final_equity'])}|{fmt(r['annual_turnover'])}|{r.get('theme')}|{r['run_id']}|"
+            f"|{r.get('rank','')}|{r['strategy']}|{r.get('factor') or ''}|{r.get('direction') or ''}|{r.get('rebalance') or ''}|{fmt(r['cagr'])}|{fmt(r['sharpe'])}|{fmt(r['max_dd'])}|{fmt(r['final_equity'])}|{fmt(r['annual_turnover'])}|{r.get('theme')}|{r.get('cfg_sig','')}|{r['run_id']}|"
         )
     out_md.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
