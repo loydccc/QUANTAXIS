@@ -109,6 +109,19 @@ def forward_return(close: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return close.shift(-horizon) / close - 1.0
 
 
+
+
+def spearman_ic(factor: pd.Series, fwd_ret: pd.Series) -> float:
+    df = pd.concat([factor, fwd_ret], axis=1).dropna()
+    if len(df) < 5:
+        return float('nan')
+    x = df.iloc[:, 0].rank(method='average')
+    y = df.iloc[:, 1].rank(method='average')
+    if x.std(ddof=0) == 0 or y.std(ddof=0) == 0:
+        return float('nan')
+    return float(x.corr(y, method='pearson'))
+
+
 def pearson_ic(factor: pd.Series, fwd_ret: pd.Series) -> float:
     df = pd.concat([factor, fwd_ret], axis=1).dropna()
     if len(df) < 5:
@@ -156,6 +169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--theme', default='all')
     ap.add_argument('--factor-parquet', required=True)
     ap.add_argument('--horizon', type=int, default=5, help='forward return horizon in trading days')
+    ap.add_argument('--rebalance', choices=['daily','weekly'], default='daily', help='evaluate only on rebalance dates')
+    ap.add_argument('--ic-method', choices=['pearson','spearman','both'], default='both')
     ap.add_argument('--quantiles', type=int, default=5)
     ap.add_argument('--outdir', default='/tmp/output')
     args = ap.parse_args(argv)
@@ -180,6 +195,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     dates = sorted(set(fac.index.get_level_values(0)) & set(close.index))
 
+    if args.rebalance == 'weekly':
+        # use last available trading day of each week (Fri label) within available dates
+        di = pd.DatetimeIndex(dates)
+        weekly = di.to_series(index=di).groupby(di.to_period('W-FRI')).max().sort_values().tolist()
+        dates = [d for d in weekly if d in set(dates)]
+
     ic_rows = []
     qret_rows = []
 
@@ -189,8 +210,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         row_q = {'date': d}
         for fc in factor_cols:
             f = fac.xs(d, level=0)[fc]
-            ic = pearson_ic(f, fwd_d)
-            row_ic[fc] = ic
+            ic_p = pearson_ic(f, fwd_d)
+            ic_s = spearman_ic(f, fwd_d)
+            if args.ic_method in ('pearson','both'):
+                row_ic[f"{fc}_ic_pearson"] = ic_p
+            if args.ic_method in ('spearman','both'):
+                row_ic[f"{fc}_ic_spearman"] = ic_s
 
             qrets, spread = quantile_portfolio_returns(f, fwd_d, n_quantiles=int(args.quantiles))
             # store per-factor spread as <factor>_qspread
@@ -220,14 +245,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         'end': str(close.index.max().date()),
         'horizon': int(args.horizon),
         'quantiles': int(args.quantiles),
+        'rebalance': args.rebalance,
+        'ic_method': args.ic_method,
         'factors': {},
     }
 
     for fc in factor_cols:
-        metrics['factors'][fc] = {
-            'ic': ic_summary(ic_df[fc]),
-            'avg_qspread': float(q_df[f"{fc}_qspread"].dropna().mean()) if f"{fc}_qspread" in q_df.columns else float('nan'),
-        }
+        out: Dict[str, object] = {}
+        if args.ic_method in ('pearson', 'both'):
+            col = f"{fc}_ic_pearson"
+            if col in ic_df.columns:
+                out['ic_pearson'] = ic_summary(ic_df[col])
+        if args.ic_method in ('spearman', 'both'):
+            col = f"{fc}_ic_spearman"
+            if col in ic_df.columns:
+                out['ic_spearman'] = ic_summary(ic_df[col])
+
+        out['avg_qspread'] = float(q_df[f"{fc}_qspread"].dropna().mean()) if f"{fc}_qspread" in q_df.columns else float('nan')
+        metrics['factors'][fc] = out
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
