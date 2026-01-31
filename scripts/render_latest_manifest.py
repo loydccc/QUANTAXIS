@@ -47,6 +47,7 @@ def main() -> int:
         'factor_eval_md': 'output/reports/latest_factor_eval.md',
         'strategy_compare_csv': 'output/reports/latest_strategy_compare.csv',
         'strategy_compare_md': 'output/reports/latest_strategy_compare.md',
+        'strategy_compare_configs': 'output/reports/latest_strategy_compare_configs.json',
     }
 
     manifest = {

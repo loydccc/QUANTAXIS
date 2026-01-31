@@ -20,7 +20,7 @@ def cfg_sig(m: dict) -> str:
         str(m.get('rebalance')),
         str(m.get('cost_bps')),
         str(m.get('factor')),
-        str(m.get('direction')),
+        str((m.get('direction') or ('long_high' if m.get('strategy') == 'factor_portfolio' else None))),
         str(m.get('topk')),
         str(m.get('quantile')),
         str(m.get('universe_fingerprint')),
@@ -150,6 +150,27 @@ def main() -> int:
         lines.append(
             f"|{r.get('rank','')}|{r['strategy']}|{r.get('factor') or ''}|{r.get('direction') or ''}|{r.get('rebalance') or ''}|{fmt(r['cagr'])}|{fmt(r['sharpe'])}|{fmt(r['max_dd'])}|{fmt(r['final_equity'])}|{fmt(r['annual_turnover'])}|{r.get('theme')}|{r.get('cfg_sig','')}|{r['run_id']}|"
         )
+    # Write configs map (for front-end drilldown)
+    cfg_out = Path(str(out_csv).replace('.csv', '_configs.json'))
+    cfg_map = {}
+    for r in rows:
+        sig = r.get('cfg_sig')
+        if not sig:
+            continue
+        # keep minimal config fields
+        cfg_map[sig] = {
+            'strategy': r.get('strategy'),
+            'theme': r.get('theme'),
+            'start': r.get('start'),
+            'end': r.get('end'),
+            'factor': r.get('factor'),
+            'direction': r.get('direction') or ('long_high' if r.get('strategy') == 'factor_portfolio' else None),
+            'rebalance': r.get('rebalance'),
+            'topk': r.get('topk'),
+            'cost_bps': r.get('cost_bps'),
+        }
+    cfg_out.write_text(__import__('json').dumps(cfg_map, indent=2, ensure_ascii=False), encoding='utf-8')
+
     out_md.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     print(f"WROTE {out_csv}")

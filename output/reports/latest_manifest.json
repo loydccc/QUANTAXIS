@@ -1,5 +1,5 @@
 {
-  "generated_at": 1769860184,
+  "generated_at": 1769860247,
   "artifacts": {
     "baseline_compare_csv": {
       "path": "output/reports/latest_compare.csv",
@@ -32,16 +32,23 @@
     "strategy_compare_csv": {
       "path": "output/reports/latest_strategy_compare.csv",
       "exists": true,
-      "bytes": 3044,
-      "sha256": "daa0fbd603022a0375dca79096250a40f545d33bbbe63a4a36ef2ec7c4348c12",
-      "mtime": 1769860183
+      "bytes": 3034,
+      "sha256": "34e8524cae51c45ac83923b8083353dbe76c63488d2ebdd8c92e38ca91e58386",
+      "mtime": 1769860247
     },
     "strategy_compare_md": {
       "path": "output/reports/latest_strategy_compare.md",
       "exists": true,
-      "bytes": 2237,
-      "sha256": "71a8d032911ae6862ed6b9ee35a7d5fc85cf50d0cc5681d2559ead6a0f6e2d23",
-      "mtime": 1769860183
+      "bytes": 2227,
+      "sha256": "821d1476ce035b1e48a20ddf43784dd95e1284058ffbb011ed3eef0908346246",
+      "mtime": 1769860247
+    },
+    "strategy_compare_configs": {
+      "path": "output/reports/latest_strategy_compare_configs.json",
+      "exists": true,
+      "bytes": 2504,
+      "sha256": "d9aa8f0313ec7621d639e1ea8313b98e644d6be9fbb1ded930f6417a4eaadf7e",
+      "mtime": 1769860247
     }
   }
 }
