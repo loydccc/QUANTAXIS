@@ -38,7 +38,7 @@ def compute_factors(close: pd.DataFrame) -> pd.DataFrame:
     factors['liq_20'] = (ret.abs() * close).rolling(20).mean()
 
     # stack to long format
-    df = pd.concat({k: v.stack(dropna=False) for k, v in factors.items()}, axis=1)
+    df = pd.concat({k: v.stack(dropna=False, future_stack=True) for k, v in factors.items()}, axis=1)
     df.index.set_names(['date', 'code'], inplace=True)
     return df
 
