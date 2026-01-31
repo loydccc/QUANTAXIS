@@ -1,0 +1,12 @@
+{
+  "strategy": "factor_portfolio",
+  "start": "20190101",
+  "end": "20241231",
+  "theme": "all",
+  "cost_bps": 10,
+  "factor": "mom_20",
+  "direction": "long_high",
+  "rebalance": "weekly",
+  "topk": 10,
+  "quantile": 0.8
+}

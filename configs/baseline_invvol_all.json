@@ -1,0 +1,13 @@
+{
+  "strategy": "xsec_momentum_weekly_invvol",
+  "start": "20190101",
+  "end": "20241231",
+  "theme": "all",
+  "cost_bps": 10,
+  "lookback": 60,
+  "top": 10,
+  "ma": 60,
+  "min_bars": 800,
+  "vol_window": 20,
+  "max_weight": 0.10
+}

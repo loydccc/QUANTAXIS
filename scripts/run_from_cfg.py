@@ -37,6 +37,15 @@ def sh(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
 
+
+
+def newest_report_dir() -> str:
+    rdir = Path('output/reports')
+    dirs = [p for p in rdir.iterdir() if p.is_dir()]
+    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(dirs[0]) if dirs else ''
+
+
 def load_cfg_from_sig(sig: str) -> Dict[str, Any]:
     p = Path('output/reports/latest_strategy_compare_configs.json')
     if not p.exists():
@@ -53,6 +62,7 @@ def main() -> int:
     ap.add_argument('--sig', help='cfg_sig to run (looks up latest_strategy_compare_configs.json)')
     ap.add_argument('--start', help='override start (YYYYMMDD)')
     ap.add_argument('--end', help='override end (YYYYMMDD)')
+    ap.add_argument('--result', default=None, help='optional path to write result JSON (run_id/report_dir)')
     args = ap.parse_args()
 
     cfg: Optional[Dict[str, Any]] = None
@@ -82,6 +92,14 @@ def main() -> int:
         vol_window = str(cfg.get('vol_window') or 20)
         max_weight = str(cfg.get('max_weight') or 0.10)
         sh(['./scripts/run_baseline_backtest.sh', start, end, theme, strategy, lookback, topk, ma, cost_bps, minbars, vol_window, max_weight])
+        report_dir = newest_report_dir()
+        run_id = Path(report_dir).name if report_dir else None
+        result_obj = {'run_id': run_id, 'report_dir': report_dir}
+        if args.result:
+            rp = Path(args.result)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            rp.write_text(json.dumps(result_obj, indent=2, ensure_ascii=False), encoding='utf-8')
+        print(json.dumps(result_obj, ensure_ascii=False))
         return 0
 
     if strategy == 'factor_portfolio':
@@ -94,6 +112,14 @@ def main() -> int:
             sh(['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, '', cost_bps])
         else:
             sh(['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, str(quantile), cost_bps])
+        report_dir = newest_report_dir()
+        run_id = Path(report_dir).name if report_dir else None
+        result_obj = {'run_id': run_id, 'report_dir': report_dir}
+        if args.result:
+            rp = Path(args.result)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            rp.write_text(json.dumps(result_obj, indent=2, ensure_ascii=False), encoding='utf-8')
+        print(json.dumps(result_obj, ensure_ascii=False))
         return 0
 
     raise SystemExit(f'unknown strategy: {strategy}')
