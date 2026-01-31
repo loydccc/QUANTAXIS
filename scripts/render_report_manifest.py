@@ -43,19 +43,12 @@ def main() -> int:
     if not metrics_path.exists():
         raise SystemExit(f"missing {metrics_path}")
 
-    m: Dict[str, Any] = json.loads(metrics_path.read_text(encoding='utf-8'))
-
+    m: Dict[str, Any] = json.loads(metrics_path.read_text(encoding='utf-8'))    # include all files in the report dir (excluding directories)
     artifacts = []
-    for name in ["metrics.json", "equity.csv", "positions.csv", "summary.md", "console.txt"]:
-        p = rpt / name
-        if p.exists() and p.is_file():
-            artifacts.append(
-                {
-                    "name": name,
-                    "bytes": p.stat().st_size,
-                    "sha256": sha256_file(p),
-                }
-            )
+    for pth in sorted(rpt.iterdir()):
+        if not pth.is_file():
+            continue
+        artifacts.append({"name": pth.name, "bytes": pth.stat().st_size, "sha256": sha256_file(pth)})
 
     created_at = int(rpt.stat().st_mtime)
 
