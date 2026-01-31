@@ -163,11 +163,20 @@ def main() -> int:
             'theme': r.get('theme'),
             'start': r.get('start'),
             'end': r.get('end'),
+            'cost_bps': r.get('cost_bps'),
+            # factor-portfolio fields
             'factor': r.get('factor'),
             'direction': r.get('direction') or ('long_high' if r.get('strategy') == 'factor_portfolio' else None),
             'rebalance': r.get('rebalance'),
             'topk': r.get('topk'),
-            'cost_bps': r.get('cost_bps'),
+            'quantile': r.get('quantile'),
+            'universe_fingerprint': r.get('universe_fingerprint'),
+            # baseline params (if present in run_id/metrics-derived rows later)
+            'lookback': r.get('lookback'),
+            'top': r.get('top'),
+            'ma': r.get('ma'),
+            'vol_window': r.get('vol_window'),
+            'max_weight': r.get('max_weight'),
         }
     cfg_out.write_text(__import__('json').dumps(cfg_map, indent=2, ensure_ascii=False), encoding='utf-8')
 
