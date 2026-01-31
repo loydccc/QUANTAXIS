@@ -1,9 +1,47 @@
 {
-  "generated_at": 1769854794,
+  "generated_at": 1769858647,
   "artifacts": {
-    "baseline_compare_csv": "output/reports/latest_compare.csv",
-    "baseline_compare_md": "output/reports/latest_compare.md",
-    "factor_eval_csv": "output/reports/latest_factor_eval.csv",
-    "factor_eval_md": "output/reports/latest_factor_eval.md"
+    "baseline_compare_csv": {
+      "path": "output/reports/latest_compare.csv",
+      "exists": true,
+      "bytes": 954,
+      "sha256": "5eab00eaee023bdd979196ac758bb3f5e22b02452fb41f09c6f2680502561def",
+      "mtime": 1769858647
+    },
+    "baseline_compare_md": {
+      "path": "output/reports/latest_compare.md",
+      "exists": true,
+      "bytes": 706,
+      "sha256": "dc7e5cffec7f329ed31f763fe878554e1521830b679dae0fa71f0d092535ded1",
+      "mtime": 1769858647
+    },
+    "factor_eval_csv": {
+      "path": "output/reports/latest_factor_eval.csv",
+      "exists": true,
+      "bytes": 2401,
+      "sha256": "f9f94546b273e8d6b2b95d6337d3d734178b3b40e7f43a1525f15de013552c21",
+      "mtime": 1769858647
+    },
+    "factor_eval_md": {
+      "path": "output/reports/latest_factor_eval.md",
+      "exists": true,
+      "bytes": 1240,
+      "sha256": "0bd1b973247eff6ffe6eaabf34a0a867aca06771d18a877d699eb4d1f4d2b41f",
+      "mtime": 1769858647
+    },
+    "strategy_compare_csv": {
+      "path": "output/reports/latest_strategy_compare.csv",
+      "exists": true,
+      "bytes": 3363,
+      "sha256": "fd7076a999042ce6a650d4d6119632b207c8f38a6f1675a59e5f909d635005d5",
+      "mtime": 1769858647
+    },
+    "strategy_compare_md": {
+      "path": "output/reports/latest_strategy_compare.md",
+      "exists": true,
+      "bytes": 2369,
+      "sha256": "12210d05293edef87620fe22f77630a88bbf0f3d4d518680b058c18dcab8de28",
+      "mtime": 1769858647
+    }
   }
 }

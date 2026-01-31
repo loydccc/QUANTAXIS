@@ -281,6 +281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "topk": int(args.topk),
         "quantile": args.quantile,
         "cost_bps": float(args.cost_bps),
+        "data": {"collection": "stock_day", "price": "close", "adjustment": "none"},
         "generated_at": int(time.time()),
         "universe_size": int(close.shape[1]),
         "universe_fingerprint": universe_fingerprint(codes),
