@@ -204,6 +204,13 @@ celerybeat*
 book/
 
 # local demo artifacts
+# output/ is usually large; keep ignored.
+# We *do* want to keep small aggregate artifacts under output/reports/.
 output/
+!output/
+!output/reports/
+!output/reports/latest_*.csv
+!output/reports/latest_*.md
+!output/reports/latest_manifest.json
 
 *.bak

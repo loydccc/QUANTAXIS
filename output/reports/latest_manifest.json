@@ -1,0 +1,9 @@
+{
+  "generated_at": 1769827016,
+  "artifacts": {
+    "baseline_compare_csv": "output/reports/latest_compare.csv",
+    "baseline_compare_md": "output/reports/latest_compare.md",
+    "factor_eval_csv": "output/reports/latest_factor_eval.csv",
+    "factor_eval_md": "output/reports/latest_factor_eval.md"
+  }
+}
