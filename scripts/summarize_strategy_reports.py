@@ -16,12 +16,15 @@ def main() -> int:
     ap.add_argument('--latest', type=int, default=12)
     ap.add_argument('--theme', default=None)
     ap.add_argument('--kind', choices=['all','baseline','factor'], default='all')
+    ap.add_argument('--sort', choices=['mtime','sharpe','cagr','max_dd'], default='mtime')
+    ap.add_argument('--top', type=int, default=None, help='if set, keep only top N after sorting')
     ap.add_argument('--out', default='output/reports/latest_strategy_compare.csv')
     ap.add_argument('--md', default='output/reports/latest_strategy_compare.md')
     args = ap.parse_args()
 
     rdir = Path(args.reports_dir)
     reports = [p for p in rdir.iterdir() if p.is_dir() and (p / 'metrics.json').exists()]
+    CAP = max(args.latest, 50)
     reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
     rows: List[Dict[str, Any]] = []
@@ -55,17 +58,37 @@ def main() -> int:
                 'cost_bps': m.get('cost_bps'),
             }
         )
-        if len(rows) >= args.latest:
+        if len(rows) >= CAP:
             break
+
+
+    # Sort
+    if args.sort == 'mtime':
+        # already in mtime order via report scan
+        pass
+    else:
+        key = args.sort
+        reverse = True
+        if key == 'max_dd':
+            # less negative drawdown is better
+            reverse = True
+        rows.sort(key=lambda r: (r.get(key) is None, r.get(key)), reverse=reverse)
+
+    if args.top is not None:
+        rows = rows[: int(args.top)]
+
+    # add rank
+    for i, r in enumerate(rows, 1):
+        r['rank'] = i
 
     # CSV
     import csv
 
     out_csv = Path(args.out)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys()) if rows else []
+    fieldnames = ['rank','strategy','factor','direction','rebalance','cagr','sharpe','max_dd','final_equity','annual_turnover','theme','start','end','run_id','cost_bps','topk'] if rows else []
     with out_csv.open('w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -81,12 +104,12 @@ def main() -> int:
     lines = [
         '# Latest strategy compare',
         '',
-        '|strategy|factor|direction|rebalance|cagr|sharpe|max_dd|final_equity|annual_turnover|theme|run_id|',
-        '|---|---|---|---|---:|---:|---:|---:|---:|---|---|',
+        '|rank|strategy|factor|direction|rebalance|cagr|sharpe|max_dd|final_equity|annual_turnover|theme|run_id|',
+        '|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---|',
     ]
     for r in rows:
         lines.append(
-            f"|{r['strategy']}|{r.get('factor') or ''}|{r.get('direction') or ''}|{r.get('rebalance') or ''}|{fmt(r['cagr'])}|{fmt(r['sharpe'])}|{fmt(r['max_dd'])}|{fmt(r['final_equity'])}|{fmt(r['annual_turnover'])}|{r.get('theme')}|{r['run_id']}|"
+            f"|{r.get('rank','')}|{r['strategy']}|{r.get('factor') or ''}|{r.get('direction') or ''}|{r.get('rebalance') or ''}|{fmt(r['cagr'])}|{fmt(r['sharpe'])}|{fmt(r['max_dd'])}|{fmt(r['final_equity'])}|{fmt(r['annual_turnover'])}|{r.get('theme')}|{r['run_id']}|"
         )
     out_md.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
