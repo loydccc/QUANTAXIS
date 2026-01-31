@@ -12,13 +12,14 @@ Security note: this is a local MVP. Do NOT expose to the public internet without
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 
@@ -28,6 +29,17 @@ RUNS_DIR = ROOT / "output" / "api_runs"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="QUANTAXIS API", version="0.1.0")
+API_TOKEN = os.getenv('QUANTAXIS_API_TOKEN', '').strip()
+
+
+def require_token(req: Request) -> None:
+    """Require X-API-Key when QUANTAXIS_API_TOKEN is set."""
+    if not API_TOKEN:
+        return
+    key = req.headers.get('x-api-key') or req.headers.get('X-API-Key')
+    if key != API_TOKEN:
+        raise HTTPException(status_code=401, detail='unauthorized')
+
 
 
 def read_json(p: Path) -> Any:
@@ -77,7 +89,7 @@ def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "ts": int(time.time())}
+    return {"ok": True, "ts": int(time.time()), "auth_required": bool(API_TOKEN)}
 
 
 @app.get("/latest/manifest")
@@ -108,7 +120,8 @@ def report_file(run_id: str, name: str):
 
 
 @app.post("/run")
-def run(cfg: Dict[str, Any], background: BackgroundTasks):
+def run(cfg: Dict[str, Any], background: BackgroundTasks, request: Request):
+    require_token(request)
     # minimal validation
     if not isinstance(cfg, dict):
         raise HTTPException(status_code=400, detail="config must be a JSON object")
@@ -121,7 +134,8 @@ def run(cfg: Dict[str, Any], background: BackgroundTasks):
 
 
 @app.get("/runs/{job_id}")
-def run_status(job_id: str):
+def run_status(job_id: str, request: Request):
+    require_token(request)
     p = RUNS_DIR / f"{job_id}.json"
     if not p.exists():
         raise HTTPException(status_code=404, detail="job not found")

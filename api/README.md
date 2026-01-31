@@ -23,3 +23,18 @@ This is a local MVP HTTP API that can:
 ## Security
 
 This is not hardened (no auth). Keep it local.
+
+
+## Auth (recommended)
+
+Set an environment variable to require a token for execution endpoints (`POST /run`, `GET /runs/*`):
+
+```bash
+export QUANTAXIS_API_TOKEN="your-secret"
+```
+
+Then call with header:
+
+- `X-API-Key: your-secret`
+
+If the token is not set, the API is open (local MVP).
