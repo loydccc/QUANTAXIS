@@ -217,3 +217,14 @@ output/
 # Allow tracking small aggregate artifacts (even though *.csv is ignored above)
 !output/reports/latest_strategy_compare.csv
 !output/reports/latest_strategy_compare.md
+
+
+# --- Clawdbot productization aggregates (tracked) ---
+# *.csv is ignored above, so we explicitly unignore the few CSV/MD artifacts we want.
+!output/reports/latest_compare.csv
+!output/reports/latest_compare.md
+!output/reports/latest_factor_eval.csv
+!output/reports/latest_factor_eval.md
+!output/reports/latest_strategy_compare.csv
+!output/reports/latest_strategy_compare.md
+!output/reports/latest_manifest.json

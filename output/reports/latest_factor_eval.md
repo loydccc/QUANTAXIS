@@ -1,5 +1,29 @@
 # Latest factor evaluations
 
+## 20260131-110634_factor_eval_theme=all_h=5_q=5_reb=monthly_ic=both_20190101-20241231
+- theme: **all**  horizon: **5**  quantiles: **5**
+- start/end: **2019-01-02** → **2024-12-31**
+
+|factor|mean IC|IR|avg q-spread|n|
+|---|---:|---:|---:|---:|
+|mom_60|nan|nan|-0.0042|nan|
+|mom_20|nan|nan|0.0068|nan|
+|vol_20|nan|nan|0.0010|nan|
+|rev_5|nan|nan|-0.0013|nan|
+|liq_20|nan|nan|-0.0027|nan|
+
+## 20260131-104006_factor_eval_theme=all_h=5_q=5_reb=weekly_ic=both_20190101-20241231
+- theme: **all**  horizon: **5**  quantiles: **5**
+- start/end: **2019-01-02** → **2024-12-31**
+
+|factor|mean IC|IR|avg q-spread|n|
+|---|---:|---:|---:|---:|
+|mom_60|nan|nan|-0.0022|nan|
+|mom_20|nan|nan|0.0003|nan|
+|vol_20|nan|nan|0.0070|nan|
+|rev_5|nan|nan|-0.0010|nan|
+|liq_20|nan|nan|0.0016|nan|
+
 ## 20260131-103334_factor_eval_theme=all_h=5_q=5_20190101-20241231
 - theme: **all**  horizon: **5**  quantiles: **5**
 - start/end: **2019-01-02** → **2024-12-31**
