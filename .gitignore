@@ -205,13 +205,18 @@ book/
 
 # local demo artifacts
 # output/ is usually large; keep ignored.
-# We *do* want to keep small aggregate artifacts under output/reports/.
-output/
-!output/
+# We only keep small aggregate artifacts under output/reports/ (latest_*).
+output/**
+# allow the reports folder itself, but not the per-run subfolders/files
 !output/reports/
+output/reports/*
+# keep a small allowlist of tracked aggregates
 !output/reports/latest_*.csv
 !output/reports/latest_*.md
 !output/reports/latest_manifest.json
+
+# API job tracking artifacts are always local
+output/api_runs/**
 
 *.bak
 # Allow tracking small aggregate artifacts (even though *.csv is ignored above)

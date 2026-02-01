@@ -38,3 +38,27 @@ Then call with header:
 - `X-API-Key: your-secret`
 
 If the token is not set, the API is open (local MVP).
+
+## Hardening knobs (recommended)
+
+These are MVP-level protections (in-memory; single-process). Configure via env vars:
+
+```bash
+# Max concurrent background jobs triggered by /run
+export QUANTAXIS_API_MAX_CONCURRENT=2
+
+# Per-IP rate limit for POST /run (requests per minute)
+export QUANTAXIS_API_RUNS_PER_MIN=6
+
+# Kill a job if it runs too long
+export QUANTAXIS_API_JOB_TIMEOUT_SEC=3600
+
+# Tail length stored for troubleshooting
+export QUANTAXIS_API_LOG_TAIL=2000
+
+# Whether GET /runs/{job_id} returns stdout/stderr tails
+# (default: false, to avoid leaking sensitive output)
+export QUANTAXIS_API_INCLUDE_LOGS=false
+```
+
+`GET /health` reports whether auth is required and the current limits.

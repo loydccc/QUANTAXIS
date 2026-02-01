@@ -3,8 +3,8 @@
 > Goal: productize a small local HTTP API around QUANTAXIS so we can **read artifacts** and **execute backtests** safely.
 
 ## Milestone 0 — Repo hygiene / baseline
-- [ ] `.gitignore` excludes `output/` and other generated artifacts
-- [ ] Basic run docs / quickstart
+- [x] `.gitignore` excludes `output/` and other generated artifacts (keep only latest aggregates)
+- [x] Basic run docs / quickstart (API README updated)
 
 ## Milestone 1 — Mode A (read-only API)
 - [x] `GET /health`
