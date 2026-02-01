@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from fastapi.responses import FileResponse, JSONResponse
 
 
@@ -222,6 +223,44 @@ def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
             _job_sem.release()
         except Exception:
             pass
+
+
+@app.get("/")
+def index():
+    """Small landing page for humans."""
+    base = "http://127.0.0.1:8000"
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <title>QUANTAXIS API</title>
+  <style>
+    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:32px; line-height:1.5}
+    code{background:#f5f5f5; padding:2px 6px; border-radius:4px}
+    a{color:#0b63ce; text-decoration:none}
+    a:hover{text-decoration:underline}
+  </style>
+</head>
+<body>
+  <h1>QUANTAXIS API</h1>
+  <p>Local MVP API for reading report artifacts and triggering backtest runs.</p>
+  <ul>
+    <li><a href=\"/docs\">/docs</a> (Swagger UI)</li>
+    <li><a href=\"/redoc\">/redoc</a> (ReDoc)</li>
+    <li><a href=\"/health\">/health</a></li>
+    <li><code>GET /latest/manifest</code></li>
+    <li><code>GET /reports/{run_id}/manifest</code></li>
+    <li><code>GET /reports/{run_id}/file/{name}</code></li>
+    <li><code>POST /run</code> (requires X-API-Key if token is set)</li>
+    <li><code>GET /runs/{job_id}</code> (requires X-API-Key if token is set)</li>
+  </ul>
+  <p>Tip: if you opened <code>""" + base + """</code> in a browser, 404 on <code>/</code> is now fixed.</p>
+</body>
+</html>
+"""
+    )
 
 
 @app.get("/health")
