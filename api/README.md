@@ -121,3 +121,8 @@ Notes:
 - Default signals output uses **2-week hold via tranche overlap** (2 tranches, each 50%) and reports `as_of_date` as the **rebalance date** (week end), matching the backtest convention.
   - Control with: `hold_weeks` (default 2) and `tranche_overlap` (default true).
 - Liquidity/suspension filter is applied in baseline: `liq_window=20` requires both close present and volume>0 in the recent window.
+- Optional hard threshold filters (high-win-rate / tradability oriented):
+  - Request cfg: `hard_vol_20d_max`, `hard_liq_20d_min` (set >0 to enable)
+  - Env defaults: `QUANTAXIS_HARD_VOL_20D_MAX`, `QUANTAXIS_HARD_LIQ_20D_MIN`
+  - Applied when `score_mode:"factor"` (because it relies on factor pack values).
+  - Debug info: `meta.hard_filters` + `meta.hard_filter_stats` (hybrid).

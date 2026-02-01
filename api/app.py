@@ -61,6 +61,11 @@ FAC_WEIGHTS = {
     "liq_20d": float(os.getenv("QUANTAXIS_SCORE_W_LIQ_20D", "0.2")),
 }
 
+# --- Hard threshold filters (tradability/risk) ---
+# Set to >0 to enable by default; request cfg may override.
+HARD_VOL_20D_MAX = float(os.getenv("QUANTAXIS_HARD_VOL_20D_MAX", "0"))
+HARD_LIQ_20D_MIN = float(os.getenv("QUANTAXIS_HARD_LIQ_20D_MIN", "0"))
+
 # In-memory concurrency + rate limit (good enough for local/one-process MVP)
 _job_sem = threading.BoundedSemaphore(max(1, API_MAX_CONCURRENT))
 _rl_lock = threading.Lock()
@@ -770,6 +775,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
+    # hard thresholds (cfg override > env default)
+    hard_vol_20d_max = float(cfg.get("hard_vol_20d_max", HARD_VOL_20D_MAX))
+    hard_liq_20d_min = float(cfg.get("hard_liq_20d_min", HARD_LIQ_20D_MIN))
+
     try:
         if strategy == "hybrid_baseline_weekly_topk":
             # 1) momentum topK
@@ -790,6 +799,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
             # build per-tranche pick lists using latest snapshots (aligned by order)
             tranche_objs = []
+            hard_filter_stats = []
             final_port: Dict[str, float] = {}
             final_scores: Dict[str, float] = {}
 
@@ -845,6 +855,24 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 else:
                     candidates = set(mom_top) | ma_set
 
+                # hard threshold filtering (only when factor pack is available)
+                hard_stats = {"before": len(candidates), "after": len(candidates), "vol_20d_max": hard_vol_20d_max, "liq_20d_min": hard_liq_20d_min}
+                if score_mode == "factor" and factor_pack and (hard_vol_20d_max > 0 or hard_liq_20d_min > 0):
+                    def _ok(code: str) -> bool:
+                        fp = factor_pack.get(code)
+                        if not fp:
+                            return False
+                        if hard_vol_20d_max > 0 and fp.get("vol_20d", 0.0) > hard_vol_20d_max:
+                            return False
+                        if hard_liq_20d_min > 0 and fp.get("liq_20d", 0.0) < hard_liq_20d_min:
+                            return False
+                        return True
+
+                    candidates = {c for c in candidates if _ok(c)}
+                    hard_stats["after"] = len(candidates)
+
+                hard_filter_stats.append({"tranche": t, **hard_stats})
+
                 def sort_key(code: str):
                     return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
 
@@ -871,15 +899,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
             factors = None
             zfactors = None
+            liq_field_detected = None
             if score_mode == "factor" and final_port:
-                factors, liq_field = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                factors, liq_field_detected = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
                 r10 = {c: factors[c]["ret_10d"] for c in factors}
                 r20 = {c: factors[c]["ret_20d"] for c in factors}
                 v20 = {c: factors[c]["vol_20d"] for c in factors}
                 liq = {c: factors[c]["liq_20d"] for c in factors}
                 zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
-                meta_extra["liq_field_detected"] = liq_field
 
             positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
 
@@ -900,6 +928,9 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     "vol_20d": int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"])),
                     "liq_20d": int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"])),
                 },
+                "liq_field_detected": liq_field_detected,
+                "hard_filters": {"vol_20d_max": hard_vol_20d_max, "liq_20d_min": hard_liq_20d_min},
+                "hard_filter_stats": hard_filter_stats,
                 "hold_weeks": hold_weeks,
                 "tranche_overlap": tranche_overlap,
                 "tranches": tranche_objs,
@@ -930,15 +961,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
             factors = None
             zfactors = None
+            liq_field_detected = None
             if score_mode == "factor" and final_port:
-                factors, liq_field = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                factors, liq_field_detected = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
                 r10 = {c: factors[c]["ret_10d"] for c in factors}
                 r20 = {c: factors[c]["ret_20d"] for c in factors}
                 v20 = {c: factors[c]["vol_20d"] for c in factors}
                 liq = {c: factors[c]["liq_20d"] for c in factors}
                 zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
-                meta_extra["liq_field_detected"] = liq_field
 
             positions = _portfolio_to_positions(final_port, factors=factors, zfactors=zfactors)
             meta_extra = {
@@ -955,6 +986,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     "vol_20d": int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"])),
                     "liq_20d": int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"])),
                 },
+                "liq_field_detected": liq_field_detected,
+                "hard_filters": {"vol_20d_max": hard_vol_20d_max, "liq_20d_min": hard_liq_20d_min},
                 "hold_weeks": hold_weeks,
                 "tranche_overlap": tranche_overlap,
                 "tranches": tranche_objs,
