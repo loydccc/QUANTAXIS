@@ -88,7 +88,7 @@ curl -s \
   http://127.0.0.1:8000/signals/run
 ```
 
-Example (hybrid c: momentum + MA **hard filter**; default). Add `score_mode:"factor"` to rank by the first factor pack (ret_10d/ret_20d/vol_20d/liq_20d):
+Example (hybrid c: momentum + MA **hard filter**; default). Add `score_mode:"factor"` to rank by the first factor pack (ret_10d/ret_20d/vol_20d/liq_20d). The signal JSON will include `meta.config_signature`, `meta.score_weights`, `meta.factor_windows`, and `meta.liq_field_detected` for reproducibility:
 
 ```bash
 curl -s \

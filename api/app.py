@@ -47,6 +47,20 @@ API_CFG_MAX_BYTES = int(os.getenv("QUANTAXIS_API_CFG_MAX_BYTES", "200000"))
 API_CFG_MAX_DEPTH = int(os.getenv("QUANTAXIS_API_CFG_MAX_DEPTH", "12"))
 API_INCLUDE_LOGS = os.getenv("QUANTAXIS_API_INCLUDE_LOGS", "").strip().lower() in {"1", "true", "yes"}
 
+# --- Factor score config (versioned in signal meta) ---
+FAC_WINDOWS = {
+    "ret_10d": int(os.getenv("QUANTAXIS_FAC_RET_10D", "10")),
+    "ret_20d": int(os.getenv("QUANTAXIS_FAC_RET_20D", "20")),
+    "vol_20d": int(os.getenv("QUANTAXIS_FAC_VOL_20D", "20")),
+    "liq_20d": int(os.getenv("QUANTAXIS_FAC_LIQ_20D", "20")),
+}
+FAC_WEIGHTS = {
+    "ret_20d": float(os.getenv("QUANTAXIS_SCORE_W_RET_20D", "1.0")),
+    "ret_10d": float(os.getenv("QUANTAXIS_SCORE_W_RET_10D", "0.5")),
+    "vol_20d": float(os.getenv("QUANTAXIS_SCORE_W_VOL_20D", "-0.5")),
+    "liq_20d": float(os.getenv("QUANTAXIS_SCORE_W_LIQ_20D", "0.2")),
+}
+
 # In-memory concurrency + rate limit (good enough for local/one-process MVP)
 _job_sem = threading.BoundedSemaphore(max(1, API_MAX_CONCURRENT))
 _rl_lock = threading.Lock()
@@ -483,10 +497,13 @@ def _zscore(s: Dict[str, float]) -> Dict[str, float]:
     return {k: (v - m) / sd for k, v in s.items()}
 
 
-def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str, Any]) -> tuple[Dict[str, Dict[str, float]], Optional[str]]:
     """Compute a small factor pack for codes at as_of_date from Mongo stock_day.
 
     Returns: {code: {ret_10d, ret_20d, vol_20d, liq_20d}}
+
+    Uses env-configured windows by default; request cfg may override with:
+    - fac_ret_10d / fac_ret_20d / fac_vol_20d / fac_liq_20d
     """
     # lazy imports so API can still import without deps in some environments
     import datetime
@@ -538,11 +555,14 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
                 liq_field = k
                 break
 
-    # windows
-    ret10 = int(cfg.get("fac_ret_10d", 10))
-    ret20 = int(cfg.get("fac_ret_20d", 20))
-    volw = int(cfg.get("fac_vol_20d", 20))
-    liqw = int(cfg.get("fac_liq_20d", 20))
+    # record detected field for meta
+    _DETECTED_LIQ_FIELD = liq_field
+
+    # windows (cfg override > env default)
+    ret10 = int(cfg.get("fac_ret_10d", FAC_WINDOWS["ret_10d"]))
+    ret20 = int(cfg.get("fac_ret_20d", FAC_WINDOWS["ret_20d"]))
+    volw = int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"]))
+    liqw = int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"]))
 
     end_dt = pd.to_datetime(as_of_date)
     # pull a bit more than needed to cover weekends/holidays gaps
@@ -588,7 +608,7 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
 
         fac[code] = {"ret_10d": r10, "ret_20d": r20, "vol_20d": v20, "liq_20d": liq}
 
-    return fac
+    return fac, liq_field
 
 
 def _extract_last_tranches_from_positions_csv(path: Path, n: int = 2) -> list[dict]:
@@ -796,16 +816,27 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 # optional factor score overrides baseline scoring
                 factor_pack: Dict[str, Dict[str, float]] = {}
                 if score_mode == "factor":
-                    factor_pack = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
+                    factor_pack, _liq_field = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
                     # build cross-sectional z-scores
                     r10 = {c: factor_pack[c]["ret_10d"] for c in factor_pack}
                     r20 = {c: factor_pack[c]["ret_20d"] for c in factor_pack}
                     v20 = {c: factor_pack[c]["vol_20d"] for c in factor_pack}
                     liq = {c: factor_pack[c]["liq_20d"] for c in factor_pack}
                     zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
-                    # weights (MVP): momentum core + risk/tradability
+                    # weights (cfg override > env default)
+                    w = {
+                        "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
+                        "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
+                        "vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
+                        "liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
+                    }
                     for c in factor_pack:
-                        scores[c] = 1.0 * zr20.get(c, 0.0) + 0.5 * zr10.get(c, 0.0) - 0.5 * zv20.get(c, 0.0) + 0.2 * zliq.get(c, 0.0)
+                        scores[c] = (
+                            w["ret_20d"] * zr20.get(c, 0.0)
+                            + w["ret_10d"] * zr10.get(c, 0.0)
+                            + w["vol_20d"] * zv20.get(c, 0.0)
+                            + w["liq_20d"] * zliq.get(c, 0.0)
+                        )
 
                 if ma_mode == "filter":
                     candidates = set(mom_top) & ma_set
@@ -841,13 +872,14 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             factors = None
             zfactors = None
             if score_mode == "factor" and final_port:
-                factors = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                factors, liq_field = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
                 r10 = {c: factors[c]["ret_10d"] for c in factors}
                 r20 = {c: factors[c]["ret_20d"] for c in factors}
                 v20 = {c: factors[c]["vol_20d"] for c in factors}
                 liq = {c: factors[c]["liq_20d"] for c in factors}
                 zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
+                meta_extra["liq_field_detected"] = liq_field
 
             positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
 
@@ -856,6 +888,18 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             meta_extra = {
                 "ma_mode": ma_mode,
                 "score_mode": score_mode,
+                "score_weights": {
+                    "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
+                    "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
+                    "vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
+                    "liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
+                },
+                "factor_windows": {
+                    "ret_10d": int(cfg.get("fac_ret_10d", FAC_WINDOWS["ret_10d"])),
+                    "ret_20d": int(cfg.get("fac_ret_20d", FAC_WINDOWS["ret_20d"])),
+                    "vol_20d": int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"])),
+                    "liq_20d": int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"])),
+                },
                 "hold_weeks": hold_weeks,
                 "tranche_overlap": tranche_overlap,
                 "tranches": tranche_objs,
@@ -887,16 +931,52 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             factors = None
             zfactors = None
             if score_mode == "factor" and final_port:
-                factors = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                factors, liq_field = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
                 r10 = {c: factors[c]["ret_10d"] for c in factors}
                 r20 = {c: factors[c]["ret_20d"] for c in factors}
                 v20 = {c: factors[c]["vol_20d"] for c in factors}
                 liq = {c: factors[c]["liq_20d"] for c in factors}
                 zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
+                meta_extra["liq_field_detected"] = liq_field
 
             positions = _portfolio_to_positions(final_port, factors=factors, zfactors=zfactors)
-            meta_extra = {"score_mode": score_mode, "hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
+            meta_extra = {
+                "score_mode": score_mode,
+                "score_weights": {
+                    "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
+                    "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
+                    "vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
+                    "liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
+                },
+                "factor_windows": {
+                    "ret_10d": int(cfg.get("fac_ret_10d", FAC_WINDOWS["ret_10d"])),
+                    "ret_20d": int(cfg.get("fac_ret_20d", FAC_WINDOWS["ret_20d"])),
+                    "vol_20d": int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"])),
+                    "liq_20d": int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"])),
+                },
+                "hold_weeks": hold_weeks,
+                "tranche_overlap": tranche_overlap,
+                "tranches": tranche_objs,
+            }
+        # version signature for reproducibility
+        meta_base = {
+            "strategy": strategy,
+            "theme": theme,
+            "top_k": top_k,
+            "rebalance": "weekly",
+            "min_bars": min_bars,
+            "liq_window": liq_window,
+            "liq_min_ratio": liq_min_ratio,
+            "lookback": lookback,
+            "ma": ma,
+            **meta_extra,
+        }
+        meta_sig = json.dumps(meta_base, sort_keys=True, ensure_ascii=False)
+        import hashlib
+
+        config_signature = hashlib.sha256(meta_sig.encode("utf-8")).hexdigest()
+
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
             "status": "succeeded",
@@ -908,14 +988,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             "top_k": top_k,
             "positions": positions,
             "meta": {
+                "config_signature": config_signature,
                 "universe_fingerprint": stats.get("universe_fingerprint"),
                 "universe_size": stats.get("universe_size"),
-                "min_bars": min_bars,
-                "liq_window": liq_window,
-                "liq_min_ratio": liq_min_ratio,
-                "lookback": lookback,
-                "ma": ma,
-                **meta_extra,
+                **meta_base,
             },
         }
 
