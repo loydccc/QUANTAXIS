@@ -261,6 +261,7 @@ def index():
     <li><code>POST /signals/run</code> (baseline weekly topK signals)</li>
     <li><code>GET /signals/{signal_id}</code></li>
     <li><code>GET /signals/{signal_id}.csv</code></li>
+    <li><code>GET /signals/{signal_id}_factors.csv</code></li>
   </ul>
   <p>Tip: if you opened <code>""" + base + """</code> in a browser, 404 on <code>/</code> is now fixed.</p>
 </body>
@@ -412,16 +413,44 @@ def _write_signal_csv(path: Path, positions: list[dict]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_factors_csv(path: Path, positions: list[dict]) -> None:
+    cols = [
+        "code",
+        "weight",
+        "rank",
+        "score",
+        "fac_ret_10d",
+        "fac_ret_20d",
+        "fac_vol_20d",
+        "fac_liq_20d",
+        "z_ret_10d",
+        "z_ret_20d",
+        "z_vol_20d",
+        "z_liq_20d",
+    ]
+    lines = [",".join(cols)]
+    for p in positions:
+        row = [str(p.get(c, "")) for c in cols]
+        lines.append(",".join(row))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _positions_to_portfolio(positions: list[dict]) -> Dict[str, float]:
     return {p["code"]: float(p["weight"]) for p in positions}
 
 
-def _portfolio_to_positions(port: Dict[str, float], scores: Optional[Dict[str, float]] = None) -> list[dict]:
+def _portfolio_to_positions(
+    port: Dict[str, float],
+    scores: Optional[Dict[str, float]] = None,
+    factors: Optional[Dict[str, Dict[str, float]]] = None,
+    zfactors: Optional[Dict[str, Dict[str, float]]] = None,
+) -> list[dict]:
     # normalize
     s = sum(max(0.0, float(w)) for w in port.values())
     if s <= 0:
         return []
     items = [(c, float(w) / s) for c, w in port.items() if float(w) > 0]
+
     # sort by weight desc, then score desc, then code
     def sk(x):
         c, w = x
@@ -431,7 +460,12 @@ def _portfolio_to_positions(port: Dict[str, float], scores: Optional[Dict[str, f
     items.sort(key=sk)
     out = []
     for i, (c, w) in enumerate(items, start=1):
-        out.append({"code": c, "weight": round(w, 10), "rank": i, "score": round((scores or {}).get(c, 0.0), 6)})
+        row = {"code": c, "weight": round(w, 10), "rank": i, "score": round((scores or {}).get(c, 0.0), 6)}
+        if factors and c in factors:
+            row.update({f"fac_{k}": factors[c].get(k) for k in ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]})
+        if zfactors and c in zfactors:
+            row.update({f"z_{k}": round(zfactors[c].get(k, 0.0), 6) for k in ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]})
+        out.append(row)
     return out
 
 
@@ -796,7 +830,19 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     }
                 )
 
-            positions = _portfolio_to_positions(final_port, scores=final_scores)
+            # attach factor attribution for final holdings when factor scoring is enabled
+            factors = None
+            zfactors = None
+            if score_mode == "factor" and final_port:
+                factors = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                r10 = {c: factors[c]["ret_10d"] for c in factors}
+                r20 = {c: factors[c]["ret_20d"] for c in factors}
+                v20 = {c: factors[c]["vol_20d"] for c in factors}
+                liq = {c: factors[c]["liq_20d"] for c in factors}
+                zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
+                zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
+
+            positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
             as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else (mom_date or ma_date)
 
             # meta: keep both components for debugging
@@ -830,7 +876,18 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     final_port[c] = final_port.get(c, 0.0) + scale * w
                 tranche_objs.append({"rebalance_date": tr[t]["rebalance_date"], "effective_date": tr[t]["effective_date"], "picks": picks})
 
-            positions = _portfolio_to_positions(final_port)
+            factors = None
+            zfactors = None
+            if score_mode == "factor" and final_port:
+                factors = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+                r10 = {c: factors[c]["ret_10d"] for c in factors}
+                r20 = {c: factors[c]["ret_20d"] for c in factors}
+                v20 = {c: factors[c]["vol_20d"] for c in factors}
+                liq = {c: factors[c]["liq_20d"] for c in factors}
+                zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
+                zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
+
+            positions = _portfolio_to_positions(final_port, factors=factors, zfactors=zfactors)
             as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else base_date
             meta_extra = {"score_mode": score_mode, "hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
         signal_obj: Dict[str, Any] = {
@@ -857,8 +914,11 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
         out_json = SIGNALS_DIR / f"{signal_id}.json"
         out_csv = SIGNALS_DIR / f"{signal_id}.csv"
+        out_fcsv = SIGNALS_DIR / f"{signal_id}_factors.csv"
         out_json.write_text(json.dumps(signal_obj, indent=2, ensure_ascii=False), encoding="utf-8")
         _write_signal_csv(out_csv, positions)
+        # optional richer output
+        _write_factors_csv(out_fcsv, positions)
 
         status_path.write_text(json.dumps({"signal_id": signal_id, "status": "succeeded", "finished_at": int(time.time())}, ensure_ascii=False), encoding="utf-8")
 
@@ -917,4 +977,13 @@ def signals_csv(signal_id: str, request: Request):
     p = SIGNALS_DIR / f"{signal_id}.csv"
     if not p.exists():
         raise HTTPException(status_code=404, detail="csv not found")
+    return FileResponse(str(p), media_type="text/csv")
+
+
+@app.get("/signals/{signal_id}_factors.csv")
+def signals_factors_csv(signal_id: str, request: Request):
+    require_token(request)
+    p = SIGNALS_DIR / f"{signal_id}_factors.csv"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="factors csv not found")
     return FileResponse(str(p), media_type="text/csv")

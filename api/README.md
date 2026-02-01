@@ -76,6 +76,7 @@ Generate a weekly **equal-weight topK** signal (manual trading workflow).
 - `POST /signals/run` (JSON body)
 - `GET /signals/{signal_id}` (JSON)
 - `GET /signals/{signal_id}.csv` (CSV)
+- `GET /signals/{signal_id}_factors.csv` (CSV with factor attribution)
 
 Example (baseline momentum):
 
@@ -112,6 +113,7 @@ Then fetch:
 ```bash
 curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id> | python3 -m json.tool
 curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id>.csv
+curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id>_factors.csv
 ```
 
 Notes:
