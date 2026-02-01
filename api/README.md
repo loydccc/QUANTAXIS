@@ -56,6 +56,12 @@ export QUANTAXIS_API_JOB_TIMEOUT_SEC=3600
 # Tail length stored for troubleshooting
 export QUANTAXIS_API_LOG_TAIL=2000
 
+# Max config payload size (bytes, UTF-8)
+export QUANTAXIS_API_CFG_MAX_BYTES=200000
+
+# Max nesting depth for config objects
+export QUANTAXIS_API_CFG_MAX_DEPTH=12
+
 # Whether GET /runs/{job_id} returns stdout/stderr tails
 # (default: false, to avoid leaking sensitive output)
 export QUANTAXIS_API_INCLUDE_LOGS=false

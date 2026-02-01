@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import re
 import threading
 import time
 import uuid
@@ -38,6 +39,8 @@ API_MAX_CONCURRENT = int(os.getenv("QUANTAXIS_API_MAX_CONCURRENT", "2"))
 API_RUNS_PER_MIN = int(os.getenv("QUANTAXIS_API_RUNS_PER_MIN", "6"))
 API_JOB_TIMEOUT_SEC = int(os.getenv("QUANTAXIS_API_JOB_TIMEOUT_SEC", "3600"))
 API_LOG_TAIL = int(os.getenv("QUANTAXIS_API_LOG_TAIL", "2000"))
+API_CFG_MAX_BYTES = int(os.getenv("QUANTAXIS_API_CFG_MAX_BYTES", "200000"))
+API_CFG_MAX_DEPTH = int(os.getenv("QUANTAXIS_API_CFG_MAX_DEPTH", "12"))
 API_INCLUDE_LOGS = os.getenv("QUANTAXIS_API_INCLUDE_LOGS", "").strip().lower() in {"1", "true", "yes"}
 
 # In-memory concurrency + rate limit (good enough for local/one-process MVP)
@@ -72,31 +75,83 @@ def _rate_limit_run(req: Request) -> None:
         dq.append(now)
 
 
-def _validate_cfg(cfg: Dict[str, Any]) -> None:
-    """Very small config sanity checks (MVP).
+def _walk_depth(x: Any, depth: int = 0) -> int:
+    if isinstance(x, dict) and x:
+        return max(_walk_depth(v, depth + 1) for v in x.values())
+    if isinstance(x, list) and x:
+        return max(_walk_depth(v, depth + 1) for v in x)
+    return depth
 
-    This is not a full schema yet, but blocks obvious abuse:
-    - huge objects
-    - pathological strings
-    - weird keys
+
+_strategy_re = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def _validate_cfg(cfg: Dict[str, Any]) -> None:
+    """Config sanity checks (MVP hardening).
+
+    Not a full schema yet, but blocks common abuse:
+    - over-large payloads
+    - very deep nesting
+    - pathological strings/keys
+    - unexpected types for key fields
     """
     if not isinstance(cfg, dict):
         raise HTTPException(status_code=400, detail="config must be a JSON object")
+
+    # serialized size guard (prevents huge payloads)
+    try:
+        raw = json.dumps(cfg, ensure_ascii=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="config must be JSON-serializable")
+    if API_CFG_MAX_BYTES > 0 and len(raw.encode("utf-8")) > API_CFG_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="config too large")
+
+    # depth guard (prevents deeply nested bombs)
+    if API_CFG_MAX_DEPTH > 0 and _walk_depth(cfg) > API_CFG_MAX_DEPTH:
+        raise HTTPException(status_code=400, detail="config too deeply nested")
+
+    if len(cfg) > 300:
+        raise HTTPException(status_code=400, detail="config has too many keys")
+
     if "strategy" not in cfg:
         raise HTTPException(status_code=400, detail="missing strategy")
-    if len(cfg) > 200:
-        raise HTTPException(status_code=400, detail="config too large")
+    if not isinstance(cfg.get("strategy"), str) or not _strategy_re.match(cfg["strategy"]):
+        raise HTTPException(status_code=400, detail="bad strategy")
+
     for k, v in cfg.items():
         if not isinstance(k, str):
             raise HTTPException(status_code=400, detail="config keys must be strings")
-        if len(k) > 200 or ".." in k or "/" in k or "\\" in k:
+        if len(k) > 200:
+            raise HTTPException(status_code=400, detail="bad config key")
+        if k.startswith("$") or ".." in k or "/" in k or "\\" in k or "\x00" in k:
             raise HTTPException(status_code=400, detail="bad config key")
         if isinstance(v, str) and len(v) > 5000:
             raise HTTPException(status_code=400, detail=f"config value too long: {k}")
+        if isinstance(v, list) and len(v) > 5000:
+            raise HTTPException(status_code=400, detail=f"config list too long: {k}")
+
+    # optional: forbid user-supplied workdir / command-like keys
+    for forbidden in ("cmd", "command", "shell", "cwd", "workdir", "path"):
+        if forbidden in cfg:
+            raise HTTPException(status_code=400, detail=f"forbidden field: {forbidden}")
 
 
 def read_json(p: Path) -> Any:
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _redact_text(s: str) -> str:
+    """Best-effort redaction for logs."""
+    if not s:
+        return s
+    out = s
+    if API_TOKEN:
+        out = out.replace(API_TOKEN, "<REDACTED>")
+    # common patterns
+    out = re.sub(r"(?i)(x-api-key\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
+    out = re.sub(r"(?i)(token\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
+    out = re.sub(r"(?i)(password\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
+    return out
 
 
 def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
@@ -128,6 +183,9 @@ def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
         if result_path.exists():
             result_obj = read_json(result_path)
 
+        stdout_tail = (proc.stdout or "")[-API_LOG_TAIL:]
+        stderr_tail = (proc.stderr or "")[-API_LOG_TAIL:]
+
         payload: Dict[str, Any] = {
             "job_id": job_id,
             "status": "succeeded" if rc == 0 else "failed",
@@ -135,8 +193,8 @@ def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
             "return_code": rc,
             "result": result_obj,
             # store tails for troubleshooting (optionally served by API)
-            "stdout_tail": (proc.stdout or "")[-API_LOG_TAIL:],
-            "stderr_tail": (proc.stderr or "")[-API_LOG_TAIL:],
+            "stdout_tail": _redact_text(stdout_tail),
+            "stderr_tail": _redact_text(stderr_tail),
         }
         job_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
