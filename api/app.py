@@ -742,6 +742,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     liq_window = int(cfg.get("liq_window", 20))
     liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
     ma_mode = str(cfg.get("ma_mode", "filter"))
+    score_mode = str(cfg.get("score_mode", "baseline"))
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
