@@ -832,6 +832,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 )
 
             # attach factor attribution for final holdings when factor scoring is enabled
+            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else (mom_date or ma_date)
+
             factors = None
             zfactors = None
             if score_mode == "factor" and final_port:
@@ -844,7 +846,6 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
 
             positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
-            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else (mom_date or ma_date)
 
             # meta: keep both components for debugging
             stats = mom_stats
@@ -877,6 +878,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     final_port[c] = final_port.get(c, 0.0) + scale * w
                 tranche_objs.append({"rebalance_date": tr[t]["rebalance_date"], "effective_date": tr[t]["effective_date"], "picks": picks})
 
+            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else base_date
+
             factors = None
             zfactors = None
             if score_mode == "factor" and final_port:
@@ -889,7 +892,6 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
 
             positions = _portfolio_to_positions(final_port, factors=factors, zfactors=zfactors)
-            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else base_date
             meta_extra = {"score_mode": score_mode, "hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
