@@ -497,18 +497,22 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
     except Exception as e:
         raise RuntimeError(f"missing deps for factor computation: {e!r}")
 
-    # Mongo cfg (same env names as baseline)
-    host = os.getenv("MONGODB_HOST", "mongodb")
-    port = int(os.getenv("MONGODB_PORT", "27017"))
-    dbn = os.getenv("MONGODB_DATABASE", "quantaxis")
-    user = os.getenv("MONGODB_USER", "quantaxis")
-    password = os.getenv("MONGODB_PASSWORD", "quantaxis")
+    # Mongo cfg (same env names as baseline, plus docker .env fallbacks)
+    host = os.getenv("MONGODB_HOST", os.getenv("MONGO_HOST", "mongodb"))
+    port = int(os.getenv("MONGODB_PORT", os.getenv("MONGO_PORT", "27017")))
+    dbn = os.getenv("MONGODB_DATABASE", os.getenv("MONGO_DATABASE", "quantaxis"))
+
+    user = os.getenv("MONGODB_USER", os.getenv("MONGO_USER", "quantaxis"))
+    password = os.getenv("MONGODB_PASSWORD", os.getenv("MONGO_PASSWORD", "quantaxis"))
+
     root_user = os.getenv("MONGO_ROOT_USER", "root")
     root_password = os.getenv("MONGO_ROOT_PASSWORD", "root")
 
+    # Try app user, root user, and finally unauthenticated (some local dev installs).
     uris = [
         f"mongodb://{user}:{password}@{host}:{port}/{dbn}?authSource=admin",
         f"mongodb://{root_user}:{root_password}@{host}:{port}/{dbn}?authSource=admin",
+        f"mongodb://{host}:{port}/{dbn}",
     ]
     last = None
     client = None
