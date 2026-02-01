@@ -52,9 +52,14 @@ Phase 6.1 (baseline → workflow)
 - [ ] Implement generator for **baseline strategies** (momentum / MA) with **weekly rebalance** and **equal-weight topK**
 
 Phase 6.2 (lightweight score → hybrid “c”)
-- [ ] Add a lightweight score/rank aggregator (e.g., normalize 1–2 baseline signals into a score)
+- [ ] Add a lightweight score/rank aggregator (normalize 1–2 baseline signals into a score)
 - [ ] Export `score` and stable tie-break rules
+- [ ] (Optional) Add 2-tranche overlap for 2-week hold (weekly rebalance, hold 2 weeks)
 
-Phase 6.3 (factor path → toward “b”)
-- [ ] Extend score to support factor-based ranking
-- [ ] Plug in factor eval outputs / factor-bt signals as optional inputs
+Phase 6.3 (factor system path → toward “b”)
+- [ ] Add factor plan + computation contract (winsorize/zscore/missing; optional neutralization)
+- [ ] Implement initial 8–12 factors (grouped: momentum, reversal, flow, risk+tradability)
+- [ ] Extend score to support factor-based ranking (multi-factor)
+- [ ] Factor evaluation fixed outputs (RankIC, stratified returns, decay, turnover, cost sensitivity)
+- [ ] Portfolio constraints fixed (liquidity, single-name cap, sector cap, cost model)
+- [ ] Plug factor eval outputs / factor-bt signals as optional inputs
