@@ -87,13 +87,13 @@ curl -s \
   http://127.0.0.1:8000/signals/run
 ```
 
-Example (hybrid c: momentum + MA **hard filter**; default):
+Example (hybrid c: momentum + MA **hard filter**; default). Add `score_mode:"factor"` to rank by the first factor pack (ret_10d/ret_20d/vol_20d/liq_20d):
 
 ```bash
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","score_mode":"factor","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
   http://127.0.0.1:8000/signals/run
 ```
 

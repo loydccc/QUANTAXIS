@@ -373,6 +373,7 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     liq_window = cfg.get("liq_window", 20)
     liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
     ma_mode = cfg.get("ma_mode", "filter")
+    score_mode = cfg.get("score_mode", "baseline")
 
     if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
         raise HTTPException(status_code=400, detail="bad strategy")
@@ -398,6 +399,9 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
 
     if ma_mode not in {"filter", "boost"}:
         raise HTTPException(status_code=400, detail="bad ma_mode (filter|boost)")
+
+    if score_mode not in {"baseline", "factor"}:
+        raise HTTPException(status_code=400, detail="bad score_mode (baseline|factor)")
 
 
 def _write_signal_csv(path: Path, positions: list[dict]) -> None:
@@ -429,6 +433,124 @@ def _portfolio_to_positions(port: Dict[str, float], scores: Optional[Dict[str, f
     for i, (c, w) in enumerate(items, start=1):
         out.append({"code": c, "weight": round(w, 10), "rank": i, "score": round((scores or {}).get(c, 0.0), 6)})
     return out
+
+
+def _zscore(s: Dict[str, float]) -> Dict[str, float]:
+    vals = [v for v in s.values() if v is not None]
+    if not vals:
+        return {k: 0.0 for k in s.keys()}
+    import math
+
+    m = sum(vals) / len(vals)
+    var = sum((v - m) ** 2 for v in vals) / max(1, (len(vals) - 1))
+    sd = math.sqrt(var) if var > 0 else 0.0
+    if sd <= 0:
+        return {k: 0.0 for k in s.keys()}
+    return {k: (v - m) / sd for k, v in s.items()}
+
+
+def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    """Compute a small factor pack for codes at as_of_date from Mongo stock_day.
+
+    Returns: {code: {ret_10d, ret_20d, vol_20d, liq_20d}}
+    """
+    # lazy imports so API can still import without deps in some environments
+    import datetime
+
+    try:
+        import pymongo  # type: ignore
+        import pandas as pd  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"missing deps for factor computation: {e!r}")
+
+    # Mongo cfg (same env names as baseline)
+    host = os.getenv("MONGODB_HOST", "mongodb")
+    port = int(os.getenv("MONGODB_PORT", "27017"))
+    dbn = os.getenv("MONGODB_DATABASE", "quantaxis")
+    user = os.getenv("MONGODB_USER", "quantaxis")
+    password = os.getenv("MONGODB_PASSWORD", "quantaxis")
+    root_user = os.getenv("MONGO_ROOT_USER", "root")
+    root_password = os.getenv("MONGO_ROOT_PASSWORD", "root")
+
+    uris = [
+        f"mongodb://{user}:{password}@{host}:{port}/{dbn}?authSource=admin",
+        f"mongodb://{root_user}:{root_password}@{host}:{port}/{dbn}?authSource=admin",
+    ]
+    last = None
+    client = None
+    for uri in uris:
+        try:
+            c = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+            c.admin.command("ping")
+            client = c
+            break
+        except Exception as e:
+            last = e
+    if client is None:
+        raise RuntimeError(f"mongo connect failed: {last!r}")
+
+    coll = client[dbn]["stock_day"]
+
+    # detect liquidity field
+    sample = coll.find_one({}, {"_id": 0, "volume": 1, "vol": 1, "amount": 1, "money": 1})
+    liq_field = None
+    if sample:
+        for k in ["amount", "volume", "vol", "money"]:
+            if k in sample and sample.get(k) is not None:
+                liq_field = k
+                break
+
+    # windows
+    ret10 = int(cfg.get("fac_ret_10d", 10))
+    ret20 = int(cfg.get("fac_ret_20d", 20))
+    volw = int(cfg.get("fac_vol_20d", 20))
+    liqw = int(cfg.get("fac_liq_20d", 20))
+
+    end_dt = pd.to_datetime(as_of_date)
+    # pull a bit more than needed to cover weekends/holidays gaps
+    start_dt = end_dt - pd.Timedelta(days=120)
+
+    proj = {"_id": 0, "date": 1, "close": 1}
+    if liq_field:
+        proj[liq_field] = 1
+
+    fac: Dict[str, Dict[str, float]] = {}
+    for code in codes:
+        cursor = coll.find(
+            {"code": code, "date": {"$gte": str(start_dt.date()), "$lte": str(end_dt.date())}},
+            proj,
+        ).sort("date", 1)
+        rows = list(cursor)
+        if not rows:
+            continue
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.drop_duplicates(subset=["date"]).set_index("date").sort_index()
+        if "close" not in df.columns:
+            continue
+        close = pd.to_numeric(df["close"], errors="coerce")
+        close = close.dropna()
+        if close.empty or close.index.max() < end_dt:
+            # if missing exact as_of_date, use last available <= end_dt
+            close = close.loc[close.index <= end_dt]
+        if close.shape[0] < max(ret20 + 1, volw + 1):
+            continue
+
+        c_end = float(close.iloc[-1])
+        r10 = float(c_end / float(close.iloc[-1 - ret10]) - 1.0) if close.shape[0] > ret10 else 0.0
+        r20 = float(c_end / float(close.iloc[-1 - ret20]) - 1.0) if close.shape[0] > ret20 else 0.0
+        ret = close.pct_change().dropna()
+        v20 = float(ret.tail(volw).std()) if ret.shape[0] >= volw else float(ret.std())
+
+        liq = 0.0
+        if liq_field and liq_field in df.columns:
+            series = pd.to_numeric(df[liq_field], errors="coerce").fillna(0.0)
+            series = series.loc[series.index <= end_dt]
+            liq = float(series.tail(liqw).mean()) if series.shape[0] >= 1 else 0.0
+
+        fac[code] = {"ret_10d": r10, "ret_20d": r20, "vol_20d": v20, "liq_20d": liq}
+
+    return fac
 
 
 def _extract_last_tranches_from_positions_csv(path: Path, n: int = 2) -> list[dict]:
@@ -632,6 +754,20 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     for code in ma_set:
                         scores[code] = scores.get(code, 0.0) + 1.0
 
+                # optional factor score overrides baseline scoring
+                factor_pack: Dict[str, Dict[str, float]] = {}
+                if score_mode == "factor":
+                    factor_pack = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
+                    # build cross-sectional z-scores
+                    r10 = {c: factor_pack[c]["ret_10d"] for c in factor_pack}
+                    r20 = {c: factor_pack[c]["ret_20d"] for c in factor_pack}
+                    v20 = {c: factor_pack[c]["vol_20d"] for c in factor_pack}
+                    liq = {c: factor_pack[c]["liq_20d"] for c in factor_pack}
+                    zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
+                    # weights (MVP): momentum core + risk/tradability
+                    for c in factor_pack:
+                        scores[c] = 1.0 * zr20.get(c, 0.0) + 0.5 * zr10.get(c, 0.0) - 0.5 * zv20.get(c, 0.0) + 0.2 * zliq.get(c, 0.0)
+
                 if ma_mode == "filter":
                     candidates = set(mom_top) & ma_set
                     if len(candidates) < max(3, min(5, top_k)):
@@ -667,6 +803,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             stats = mom_stats
             meta_extra = {
                 "ma_mode": ma_mode,
+                "score_mode": score_mode,
                 "hold_weeks": hold_weeks,
                 "tranche_overlap": tranche_overlap,
                 "tranches": tranche_objs,
@@ -695,7 +832,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
             positions = _portfolio_to_positions(final_port)
             as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else base_date
-            meta_extra = {"hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
+            meta_extra = {"score_mode": score_mode, "hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
             "status": "succeeded",
