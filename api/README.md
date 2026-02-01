@@ -87,13 +87,23 @@ curl -s \
   http://127.0.0.1:8000/signals/run
 ```
 
-Example (hybrid c: momentum + MA filter):
+Example (hybrid c: momentum + MA **hard filter**; default):
 
 ```bash
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  http://127.0.0.1:8000/signals/run
+```
+
+Example (hybrid c: momentum + MA **soft boost**):
+
+```bash
+curl -s \
+  -H "X-API-Key: your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"boost","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
   http://127.0.0.1:8000/signals/run
 ```
 

@@ -370,6 +370,7 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     rebalance = cfg.get("rebalance", "weekly")
     liq_window = cfg.get("liq_window", 20)
     liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
+    ma_mode = cfg.get("ma_mode", "filter")
 
     if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
         raise HTTPException(status_code=400, detail="bad strategy")
@@ -387,6 +388,9 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="bad liq_min_ratio")
     if liq_min_ratio_f <= 0 or liq_min_ratio_f > 1.0:
         raise HTTPException(status_code=400, detail="bad liq_min_ratio")
+
+    if ma_mode not in {"filter", "boost"}:
+        raise HTTPException(status_code=400, detail="bad ma_mode (filter|boost)")
 
 
 def _write_signal_csv(path: Path, positions: list[dict]) -> None:
@@ -517,6 +521,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     min_bars = int(cfg.get("min_bars", 800))
     liq_window = int(cfg.get("liq_window", 20))
     liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
+    ma_mode = str(cfg.get("ma_mode", "filter"))
 
     try:
         if strategy == "hybrid_baseline_weekly_topk":
@@ -533,19 +538,32 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             as_of_date = mom_date or ma_date
             ma_set = set(ma_picks)
 
-            # score: momentum rank score + MA bonus
+            # score: momentum rank score (+ optional MA bonus)
             scores: Dict[str, float] = {}
             mom_rank: Dict[str, int] = {}
             for i, code in enumerate(mom_picks[:top_k], start=1):
                 mom_rank[code] = i
                 scores[code] = float(top_k - i + 1)
-            for code in ma_set:
-                scores[code] = scores.get(code, 0.0) + 1.0
 
-            # candidate universe = union
-            candidates = set(mom_picks[:top_k]) | ma_set
+            if ma_mode == "boost":
+                for code in ma_set:
+                    scores[code] = scores.get(code, 0.0) + 1.0
+
+            # candidate universe
+            if ma_mode == "filter":
+                # hard constraint: only names that pass MA long filter are eligible
+                candidates = set(mom_picks[:top_k]) & ma_set
+                # if too few candidates, fallback to MA long set and use momentum as tie-break
+                if len(candidates) < max(3, min(5, top_k)):
+                    candidates = set(ma_set)
+            else:
+                # soft confirmation: union
+                candidates = set(mom_picks[:top_k]) | ma_set
 
             def sort_key(code: str):
+                # primary: score desc
+                # tie-break: momentum rank asc (if present)
+                # final: code
                 return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
 
             picks = sorted(candidates, key=sort_key)[:top_k]
@@ -559,6 +577,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             # meta: keep both components for debugging
             stats = mom_stats
             meta_extra = {
+                "ma_mode": ma_mode,
                 "component_momentum_as_of": mom_date,
                 "component_ma_as_of": ma_date,
                 "component_momentum_topk": mom_picks[:top_k],
