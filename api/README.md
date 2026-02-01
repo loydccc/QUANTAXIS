@@ -68,3 +68,32 @@ export QUANTAXIS_API_INCLUDE_LOGS=false
 ```
 
 `GET /health` reports whether auth is required and the current limits.
+
+## Signals (Mode C MVP)
+
+Generate a weekly **equal-weight topK** signal (manual trading workflow).
+
+- `POST /signals/run` (JSON body)
+- `GET /signals/{signal_id}` (JSON)
+- `GET /signals/{signal_id}.csv` (CSV)
+
+Example:
+
+```bash
+curl -s \
+  -H "X-API-Key: your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"strategy":"xsec_momentum_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800}' \
+  http://127.0.0.1:8000/signals/run
+```
+
+Then fetch:
+
+```bash
+curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id> | python3 -m json.tool
+curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id>.csv
+```
+
+Notes:
+- This uses `scripts/backtest_baseline.py` to produce an internal `positions.csv`, then extracts the **latest non-zero portfolio** as the signal.
+- Basic filtering currently relies on `min_bars` and non-NaN data. More liquidity/suspension filters can be added next.
