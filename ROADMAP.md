@@ -36,3 +36,25 @@
 - [ ] Proper config management (Pydantic settings)
 - [ ] Structured logging
 - [ ] Tests for auth + path traversal
+
+## Milestone 6 — Mode C (Signals) — baseline weekly topK (manual trading)
+> Goal: produce a **daily/weekly “what to buy” list** (JSON + CSV) for manual execution.
+
+Phase 6.1 (baseline → workflow)
+- [ ] Add signal job store under `output/signals/`
+- [ ] Define signal artifact schema (JSON) + CSV export
+  - required: `as_of_date`, `strategy`, `universe`, `top_k`, `rebalance`, `positions[] (code, weight, rank, score)`
+  - include: data/version fingerprints (universe fingerprint, config signature)
+- [ ] Add API endpoints:
+  - `POST /signals/run` → returns `signal_id` (async)
+  - `GET /signals/{signal_id}` → returns JSON
+  - `GET /signals/{signal_id}.csv` → returns CSV
+- [ ] Implement generator for **baseline strategies** (momentum / MA) with **weekly rebalance** and **equal-weight topK**
+
+Phase 6.2 (lightweight score → hybrid “c”)
+- [ ] Add a lightweight score/rank aggregator (e.g., normalize 1–2 baseline signals into a score)
+- [ ] Export `score` and stable tie-break rules
+
+Phase 6.3 (factor path → toward “b”)
+- [ ] Extend score to support factor-based ranking
+- [ ] Plug in factor eval outputs / factor-bt signals as optional inputs
