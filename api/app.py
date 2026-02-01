@@ -368,6 +368,8 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     theme = cfg.get("theme", "all")
     top_k = cfg.get("top_k", 10)
     rebalance = cfg.get("rebalance", "weekly")
+    hold_weeks = cfg.get("hold_weeks", 2)
+    tranche_overlap = cfg.get("tranche_overlap", True)
     liq_window = cfg.get("liq_window", 20)
     liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
     ma_mode = cfg.get("ma_mode", "filter")
@@ -380,6 +382,11 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="only weekly rebalance supported in MVP")
     if not isinstance(top_k, int) or top_k <= 0 or top_k > 200:
         raise HTTPException(status_code=400, detail="bad top_k")
+    if not isinstance(hold_weeks, int) or hold_weeks < 1 or hold_weeks > 8:
+        raise HTTPException(status_code=400, detail="bad hold_weeks")
+    if not isinstance(tranche_overlap, bool):
+        raise HTTPException(status_code=400, detail="bad tranche_overlap")
+
     if not isinstance(liq_window, int) or liq_window < 0 or liq_window > 252:
         raise HTTPException(status_code=400, detail="bad liq_window")
     try:
@@ -399,6 +406,63 @@ def _write_signal_csv(path: Path, positions: list[dict]) -> None:
     for p in positions:
         lines.append(f"{p['code']},{p['weight']},{p['rank']},{p['score']}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _positions_to_portfolio(positions: list[dict]) -> Dict[str, float]:
+    return {p["code"]: float(p["weight"]) for p in positions}
+
+
+def _portfolio_to_positions(port: Dict[str, float], scores: Optional[Dict[str, float]] = None) -> list[dict]:
+    # normalize
+    s = sum(max(0.0, float(w)) for w in port.values())
+    if s <= 0:
+        return []
+    items = [(c, float(w) / s) for c, w in port.items() if float(w) > 0]
+    # sort by weight desc, then score desc, then code
+    def sk(x):
+        c, w = x
+        sc = (scores or {}).get(c, 0.0)
+        return (-w, -sc, c)
+
+    items.sort(key=sk)
+    out = []
+    for i, (c, w) in enumerate(items, start=1):
+        out.append({"code": c, "weight": round(w, 10), "rank": i, "score": round((scores or {}).get(c, 0.0), 6)})
+    return out
+
+
+def _extract_last_tranches_from_positions_csv(path: Path, n: int = 2) -> list[dict]:
+    """Extract last N tranche snapshots from positions.csv.
+
+    We detect rebalance-effective days by row changes; then infer rebalance_date as previous trading day.
+    Returns list of dicts: {rebalance_date, effective_date, weights{code:weight}}
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path)
+    if df.shape[0] < 2:
+        raise RuntimeError("positions.csv too short")
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date")
+    # find rows where any position changed vs previous row
+    changed = (df.diff().abs().sum(axis=1) > 1e-12)
+    # keep only changes that lead to some non-zero exposure
+    nonzero = (df.abs().sum(axis=1) > 0)
+    eff_dates = [d for d in df.index[changed & nonzero]]
+    if not eff_dates:
+        # fallback to last non-zero day
+        eff_dates = [df.index[nonzero][-1]]
+
+    eff_dates = eff_dates[-n:]
+    out = []
+    for d in eff_dates[::-1]:
+        # inferred rebalance date = previous available trading day
+        idx = df.index.get_loc(d)
+        reb = df.index[idx - 1] if isinstance(idx, int) and idx > 0 else d
+        row = df.loc[d]
+        weights = {c: float(row[c]) for c in df.columns if pd.notna(row[c]) and float(row[c]) > 0}
+        out.append({"rebalance_date": str(reb.date()), "effective_date": str(d.date()), "weights": weights})
+    return out
 
 
 def _extract_latest_positions_from_positions_csv(path: Path) -> tuple[str, list[tuple[str, float]]]:
@@ -522,6 +586,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     liq_window = int(cfg.get("liq_window", 20))
     liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
     ma_mode = str(cfg.get("ma_mode", "filter"))
+    hold_weeks = int(cfg.get("hold_weeks", 2))
+    tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
     try:
         if strategy == "hybrid_baseline_weekly_topk":
@@ -535,66 +601,101 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             ma_dir.mkdir(parents=True, exist_ok=True)
             ma_date, ma_picks, ma_stats = _run_baseline_backtest_to_workdir(ma_dir, cfg, "ts_ma_weekly")
 
-            as_of_date = mom_date or ma_date
-            ma_set = set(ma_picks)
+            # tranche overlap extraction
+            import pandas as pd
 
-            # score: momentum rank score (+ optional MA bonus)
-            scores: Dict[str, float] = {}
-            mom_rank: Dict[str, int] = {}
-            for i, code in enumerate(mom_picks[:top_k], start=1):
-                mom_rank[code] = i
-                scores[code] = float(top_k - i + 1)
+            mom_tr = _extract_last_tranches_from_positions_csv(mom_dir / "positions.csv", n=max(hold_weeks, 1))
+            ma_tr = _extract_last_tranches_from_positions_csv(ma_dir / "positions.csv", n=max(hold_weeks, 1))
 
-            if ma_mode == "boost":
-                for code in ma_set:
-                    scores[code] = scores.get(code, 0.0) + 1.0
+            # build per-tranche pick lists using latest snapshots (aligned by order)
+            tranche_objs = []
+            final_port: Dict[str, float] = {}
+            final_scores: Dict[str, float] = {}
 
-            # candidate universe
-            if ma_mode == "filter":
-                # hard constraint: only names that pass MA long filter are eligible
-                candidates = set(mom_picks[:top_k]) & ma_set
-                # if too few candidates, fallback to MA long set and use momentum as tie-break
-                if len(candidates) < max(3, min(5, top_k)):
-                    candidates = set(ma_set)
-            else:
-                # soft confirmation: union
-                candidates = set(mom_picks[:top_k]) | ma_set
+            n_tr = 1 if not tranche_overlap or hold_weeks <= 1 else min(2, hold_weeks)
+            scale = 1.0 / n_tr
 
-            def sort_key(code: str):
-                # primary: score desc
-                # tie-break: momentum rank asc (if present)
-                # final: code
-                return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
+            for t in range(n_tr):
+                mom_w = mom_tr[t]["weights"] if t < len(mom_tr) else {}
+                ma_w = ma_tr[t]["weights"] if t < len(ma_tr) else {}
+                # momentum picks: take top_k by weight (they are equal, but keep stable)
+                mom_sorted = sorted(mom_w.items(), key=lambda x: (-x[1], x[0]))
+                mom_top = [c for c, _w in mom_sorted][:top_k]
+                ma_set = set([c for c, w in ma_w.items() if w > 0])
 
-            picks = sorted(candidates, key=sort_key)[:top_k]
+                scores: Dict[str, float] = {}
+                mom_rank: Dict[str, int] = {}
+                for i, code in enumerate(mom_top, start=1):
+                    mom_rank[code] = i
+                    scores[code] = float(top_k - i + 1)
+                if ma_mode == "boost":
+                    for code in ma_set:
+                        scores[code] = scores.get(code, 0.0) + 1.0
 
-            positions = []
-            if picks:
-                w = 1.0 / len(picks)
-                for i, code in enumerate(picks, start=1):
-                    positions.append({"code": code, "weight": round(w, 10), "rank": i, "score": round(scores.get(code, 0.0), 6)})
+                if ma_mode == "filter":
+                    candidates = set(mom_top) & ma_set
+                    if len(candidates) < max(3, min(5, top_k)):
+                        candidates = set(ma_set)
+                else:
+                    candidates = set(mom_top) | ma_set
+
+                def sort_key(code: str):
+                    return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
+
+                picks = sorted(candidates, key=sort_key)[:top_k]
+
+                # tranche equal weights
+                tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
+
+                # merge to final portfolio
+                for c, w in tranche_port.items():
+                    final_port[c] = final_port.get(c, 0.0) + scale * w
+                    final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
+
+                tranche_objs.append(
+                    {
+                        "rebalance_date": mom_tr[t]["rebalance_date"],
+                        "effective_date": mom_tr[t]["effective_date"],
+                        "picks": picks,
+                    }
+                )
+
+            positions = _portfolio_to_positions(final_port, scores=final_scores)
+            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else (mom_date or ma_date)
 
             # meta: keep both components for debugging
             stats = mom_stats
             meta_extra = {
                 "ma_mode": ma_mode,
+                "hold_weeks": hold_weeks,
+                "tranche_overlap": tranche_overlap,
+                "tranches": tranche_objs,
                 "component_momentum_as_of": mom_date,
                 "component_ma_as_of": ma_date,
                 "component_momentum_topk": mom_picks[:top_k],
-                "component_ma_long": sorted(list(ma_set))[:200],
+                "component_ma_long": sorted(list(set(ma_picks)))[:200],
             }
 
         else:
             # baseline single-strategy signal
             base_date, base_picks, stats = _run_baseline_backtest_to_workdir(workdir, cfg, strategy)
-            as_of_date = base_date
-            picks = base_picks[:top_k]
-            positions = []
-            if picks:
-                w = 1.0 / len(picks)
-                for i, code in enumerate(picks, start=1):
-                    positions.append({"code": code, "weight": round(w, 10), "rank": i, "score": 1.0})
-            meta_extra = {}
+            # tranche overlap for baseline
+            tr = _extract_last_tranches_from_positions_csv(workdir / "positions.csv", n=max(hold_weeks, 1))
+            n_tr = 1 if not tranche_overlap or hold_weeks <= 1 else min(2, hold_weeks)
+            scale = 1.0 / n_tr
+            final_port: Dict[str, float] = {}
+            tranche_objs = []
+            for t in range(n_tr):
+                wmap = tr[t]["weights"] if t < len(tr) else {}
+                picks = [c for c, _w in sorted(wmap.items(), key=lambda x: (-x[1], x[0]))][:top_k]
+                tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
+                for c, w in tranche_port.items():
+                    final_port[c] = final_port.get(c, 0.0) + scale * w
+                tranche_objs.append({"rebalance_date": tr[t]["rebalance_date"], "effective_date": tr[t]["effective_date"], "picks": picks})
+
+            positions = _portfolio_to_positions(final_port)
+            as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else base_date
+            meta_extra = {"hold_weeks": hold_weeks, "tranche_overlap": tranche_overlap, "tranches": tranche_objs}
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
             "status": "succeeded",

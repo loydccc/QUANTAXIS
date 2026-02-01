@@ -93,7 +93,7 @@ Example (hybrid c: momentum + MA **hard filter**; default):
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
   http://127.0.0.1:8000/signals/run
 ```
 
@@ -103,7 +103,7 @@ Example (hybrid c: momentum + MA **soft boost**):
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"boost","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"boost","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
   http://127.0.0.1:8000/signals/run
 ```
 
@@ -115,5 +115,7 @@ curl -s -H "X-API-Key: your-secret" http://127.0.0.1:8000/signals/<signal_id>.cs
 ```
 
 Notes:
-- This uses `scripts/backtest_baseline.py` to produce an internal `positions.csv`, then extracts the **latest non-zero portfolio** as the signal.
-- Basic filtering currently relies on `min_bars` and non-NaN data. More liquidity/suspension filters can be added next.
+- This uses `scripts/backtest_baseline.py` to produce an internal `positions.csv`, then extracts tranche snapshots.
+- Default signals output uses **2-week hold via tranche overlap** (2 tranches, each 50%) and reports `as_of_date` as the **rebalance date** (week end), matching the backtest convention.
+  - Control with: `hold_weeks` (default 2) and `tranche_overlap` (default true).
+- Liquidity/suspension filter is applied in baseline: `liq_window=20` requires both close present and volume>0 in the recent window.
