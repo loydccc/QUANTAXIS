@@ -353,7 +353,7 @@ def run_status(job_id: str, request: Request):
 # Signals API (Mode C MVP)
 # -------------------------
 
-_baseline_strategy_re = re.compile(r"^(xsec_momentum_weekly_topk|ts_ma_weekly)$")
+_baseline_strategy_re = re.compile(r"^(xsec_momentum_weekly_topk|ts_ma_weekly|hybrid_baseline_weekly_topk)$")
 _theme_re = re.compile(r"^[A-Za-z0-9_.-]{1,60}$")
 
 
@@ -397,18 +397,46 @@ def _write_signal_csv(path: Path, positions: list[dict]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
-    """Generate a baseline weekly topK signal as JSON+CSV under output/signals/."""
-    status_path = SIGNALS_DIR / f"{signal_id}.status.json"
-    status_path.write_text(
-        json.dumps({"signal_id": signal_id, "status": "running", "started_at": int(time.time())}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+def _extract_latest_positions_from_positions_csv(path: Path) -> tuple[str, list[tuple[str, float]]]:
+    """Return (as_of_date, [(code, weight>0), ...]) from the latest non-zero row."""
+    import csv
 
-    workdir = SIGNALS_DIR / f"{signal_id}.work"
-    workdir.mkdir(parents=True, exist_ok=True)
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = list(reader)
 
-    strategy = str(cfg.get("strategy"))
+    if not rows:
+        raise RuntimeError("positions.csv is empty")
+
+    last_row = None
+    for r in reversed(rows):
+        try:
+            if any((c and float(c) != 0.0) for c in r[1:]):
+                last_row = r
+                break
+        except Exception:
+            continue
+    if last_row is None:
+        last_row = rows[-1]
+
+    as_of_date = last_row[0]
+    weights = []
+    for i in range(1, len(header)):
+        c = last_row[i]
+        try:
+            w = float(c) if c else 0.0
+        except Exception:
+            w = 0.0
+        if w > 0:
+            weights.append((header[i], w))
+
+    weights.sort(key=lambda x: x[1], reverse=True)
+    return as_of_date, weights
+
+
+def _run_baseline_backtest_to_workdir(workdir: Path, cfg: Dict[str, Any], strategy: str) -> tuple[str, list[str], Dict[str, Any]]:
+    """Run baseline backtest and return (as_of_date, picks_by_weight_desc, metrics_obj)."""
     theme = str(cfg.get("theme", "all"))
     top_k = int(cfg.get("top_k", 10))
     lookback = int(cfg.get("lookback", 60))
@@ -420,7 +448,6 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     start = str(cfg.get("start", "2019-01-01"))
     end = str(cfg.get("end", "2099-12-31"))
 
-    # Run baseline script to produce positions.csv/metrics.json
     cmd = [
         "python3",
         "scripts/backtest_baseline.py",
@@ -450,55 +477,105 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         str(workdir),
     ]
 
+    proc = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=max(1, API_JOB_TIMEOUT_SEC),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "run failed")[-API_LOG_TAIL:])
+
+    positions_csv = workdir / "positions.csv"
+    metrics_json = workdir / "metrics.json"
+    if not positions_csv.exists() or not metrics_json.exists():
+        raise RuntimeError("missing baseline outputs (positions.csv/metrics.json)")
+
+    as_of_date, weights = _extract_latest_positions_from_positions_csv(positions_csv)
+    picks = [c for c, _w in weights]
+    stats = read_json(metrics_json)
+    return as_of_date, picks, stats
+
+
+def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
+    """Generate a weekly topK signal as JSON+CSV under output/signals/."""
+    status_path = SIGNALS_DIR / f"{signal_id}.status.json"
+    status_path.write_text(
+        json.dumps({"signal_id": signal_id, "status": "running", "started_at": int(time.time())}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    workdir = SIGNALS_DIR / f"{signal_id}.work"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    strategy = str(cfg.get("strategy"))
+    theme = str(cfg.get("theme", "all"))
+    top_k = int(cfg.get("top_k", 10))
+    lookback = int(cfg.get("lookback", 60))
+    ma = int(cfg.get("ma", 60))
+    min_bars = int(cfg.get("min_bars", 800))
+    liq_window = int(cfg.get("liq_window", 20))
+    liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
+
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=max(1, API_JOB_TIMEOUT_SEC),
-        )
-        if proc.returncode != 0:
-            raise RuntimeError((proc.stderr or proc.stdout or "run failed")[-API_LOG_TAIL:])
+        if strategy == "hybrid_baseline_weekly_topk":
+            # 1) momentum topK
+            mom_dir = workdir / "mom"
+            mom_dir.mkdir(parents=True, exist_ok=True)
+            mom_date, mom_picks, mom_stats = _run_baseline_backtest_to_workdir(mom_dir, cfg, "xsec_momentum_weekly_topk")
 
-        positions_csv = workdir / "positions.csv"
-        metrics_json = workdir / "metrics.json"
-        if not positions_csv.exists() or not metrics_json.exists():
-            raise RuntimeError("missing baseline outputs (positions.csv/metrics.json)")
+            # 2) MA filter (acts like a breadth filter)
+            ma_dir = workdir / "ma"
+            ma_dir.mkdir(parents=True, exist_ok=True)
+            ma_date, ma_picks, ma_stats = _run_baseline_backtest_to_workdir(ma_dir, cfg, "ts_ma_weekly")
 
-        # parse last non-zero portfolio row
-        import csv
+            as_of_date = mom_date or ma_date
+            ma_set = set(ma_picks)
 
-        with positions_csv.open("r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            rows = list(reader)
+            # score: momentum rank score + MA bonus
+            scores: Dict[str, float] = {}
+            mom_rank: Dict[str, int] = {}
+            for i, code in enumerate(mom_picks[:top_k], start=1):
+                mom_rank[code] = i
+                scores[code] = float(top_k - i + 1)
+            for code in ma_set:
+                scores[code] = scores.get(code, 0.0) + 1.0
 
-        if not rows:
-            raise RuntimeError("positions.csv is empty")
+            # candidate universe = union
+            candidates = set(mom_picks[:top_k]) | ma_set
 
-        # find last row that has any non-zero weights
-        last_row = None
-        for r in reversed(rows):
-            if any((c and float(c) != 0.0) for c in r[1:]):
-                last_row = r
-                break
-        if last_row is None:
-            last_row = rows[-1]
+            def sort_key(code: str):
+                return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
 
-        as_of_date = last_row[0]
-        weights = [(header[i], float(last_row[i])) for i in range(1, len(header)) if last_row[i] and float(last_row[i]) > 0]
-        weights.sort(key=lambda x: x[1], reverse=True)
+            picks = sorted(candidates, key=sort_key)[:top_k]
 
-        # equal-weight topK (weights in positions.csv may already be equal; we normalize anyway)
-        picks = [c for c, _w in weights][:top_k]
-        positions = []
-        if picks:
-            w = 1.0 / len(picks)
-            for i, code in enumerate(picks, start=1):
-                positions.append({"code": code, "weight": round(w, 10), "rank": i, "score": 1.0})
+            positions = []
+            if picks:
+                w = 1.0 / len(picks)
+                for i, code in enumerate(picks, start=1):
+                    positions.append({"code": code, "weight": round(w, 10), "rank": i, "score": round(scores.get(code, 0.0), 6)})
 
-        stats = read_json(metrics_json)
+            # meta: keep both components for debugging
+            stats = mom_stats
+            meta_extra = {
+                "component_momentum_as_of": mom_date,
+                "component_ma_as_of": ma_date,
+                "component_momentum_topk": mom_picks[:top_k],
+                "component_ma_long": sorted(list(ma_set))[:200],
+            }
+
+        else:
+            # baseline single-strategy signal
+            base_date, base_picks, stats = _run_baseline_backtest_to_workdir(workdir, cfg, strategy)
+            as_of_date = base_date
+            picks = base_picks[:top_k]
+            positions = []
+            if picks:
+                w = 1.0 / len(picks)
+                for i, code in enumerate(picks, start=1):
+                    positions.append({"code": code, "weight": round(w, 10), "rank": i, "score": 1.0})
+            meta_extra = {}
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
             "status": "succeeded",
@@ -517,6 +594,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "liq_min_ratio": liq_min_ratio,
                 "lookback": lookback,
                 "ma": ma,
+                **meta_extra,
             },
         }
 

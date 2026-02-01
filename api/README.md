@@ -77,13 +77,23 @@ Generate a weekly **equal-weight topK** signal (manual trading workflow).
 - `GET /signals/{signal_id}` (JSON)
 - `GET /signals/{signal_id}.csv` (CSV)
 
-Example:
+Example (baseline momentum):
 
 ```bash
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
   -d '{"strategy":"xsec_momentum_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  http://127.0.0.1:8000/signals/run
+```
+
+Example (hybrid c: momentum + MA filter):
+
+```bash
+curl -s \
+  -H "X-API-Key: your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
   http://127.0.0.1:8000/signals/run
 ```
 
