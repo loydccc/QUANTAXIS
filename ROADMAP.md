@@ -1,6 +1,6 @@
 # QUANTAXIS API – Roadmap / Milestones
 
-> Goal: productize a small local HTTP API around QUANTAXIS so we can **read artifacts** and **execute backtests** safely.
+> Goal: productize a small local HTTP API around QUANTAXIS so we can **read artifacts**, **execute backtests**, and (Mode C) generate **high-win-rate oriented** stock selection signals safely.
 
 ## Milestone 0 — Repo hygiene / baseline
 - [x] `.gitignore` excludes `output/` and other generated artifacts (keep only latest aggregates)
@@ -38,7 +38,7 @@
 - [ ] Tests for auth + path traversal
 
 ## Milestone 6 — Mode C (Signals) — baseline weekly topK (manual trading)
-> Goal: produce a **daily/weekly “what to buy” list** (JSON + CSV) for manual execution.
+> Goal: produce a **weekly “what to buy” list** (JSON + CSV) for manual execution, optimized for **high win rate** and stability (not just backtest CAGR).
 
 Phase 6.1 (baseline → workflow)
 - [ ] Add signal job store under `output/signals/`
