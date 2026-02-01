@@ -368,6 +368,8 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     theme = cfg.get("theme", "all")
     top_k = cfg.get("top_k", 10)
     rebalance = cfg.get("rebalance", "weekly")
+    liq_window = cfg.get("liq_window", 20)
+    liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
 
     if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
         raise HTTPException(status_code=400, detail="bad strategy")
@@ -377,6 +379,14 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="only weekly rebalance supported in MVP")
     if not isinstance(top_k, int) or top_k <= 0 or top_k > 200:
         raise HTTPException(status_code=400, detail="bad top_k")
+    if not isinstance(liq_window, int) or liq_window < 0 or liq_window > 252:
+        raise HTTPException(status_code=400, detail="bad liq_window")
+    try:
+        liq_min_ratio_f = float(liq_min_ratio)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad liq_min_ratio")
+    if liq_min_ratio_f <= 0 or liq_min_ratio_f > 1.0:
+        raise HTTPException(status_code=400, detail="bad liq_min_ratio")
 
 
 def _write_signal_csv(path: Path, positions: list[dict]) -> None:
@@ -404,6 +414,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     lookback = int(cfg.get("lookback", 60))
     ma = int(cfg.get("ma", 60))
     min_bars = int(cfg.get("min_bars", 800))
+    liq_window = int(cfg.get("liq_window", 20))
+    liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
     cost_bps = float(cfg.get("cost_bps", 10.0))
     start = str(cfg.get("start", "2019-01-01"))
     end = str(cfg.get("end", "2099-12-31"))
@@ -428,6 +440,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         str(ma),
         "--min-bars",
         str(min_bars),
+        "--liq-window",
+        str(liq_window),
+        "--liq-min-ratio",
+        str(liq_min_ratio),
         "--cost-bps",
         str(cost_bps),
         "--outdir",
@@ -497,6 +513,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "universe_fingerprint": stats.get("universe_fingerprint"),
                 "universe_size": stats.get("universe_size"),
                 "min_bars": min_bars,
+                "liq_window": liq_window,
+                "liq_min_ratio": liq_min_ratio,
                 "lookback": lookback,
                 "ma": ma,
             },
