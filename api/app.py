@@ -117,6 +117,8 @@ def _validate_cfg(cfg: Dict[str, Any]) -> None:
     - very deep nesting
     - pathological strings/keys
     - unexpected types for key fields
+
+    Additionally, we require data version fingerprints for reproducible backtests.
     """
     if not isinstance(cfg, dict):
         raise HTTPException(status_code=400, detail="config must be a JSON object")
@@ -140,6 +142,13 @@ def _validate_cfg(cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="missing strategy")
     if not isinstance(cfg.get("strategy"), str) or not _strategy_re.match(cfg["strategy"]):
         raise HTTPException(status_code=400, detail="bad strategy")
+
+    # --- reproducibility requirements (data version fingerprints) ---
+    # We keep these fields at top-level for now to avoid premature schema frameworks.
+    if not isinstance(cfg.get("data_version_id"), str) or not cfg.get("data_version_id"):
+        raise HTTPException(status_code=400, detail="missing data_version_id")
+    if not isinstance(cfg.get("manifest_sha256"), str) or len(cfg.get("manifest_sha256")) != 64:
+        raise HTTPException(status_code=400, detail="missing or bad manifest_sha256")
 
     for k, v in cfg.items():
         if not isinstance(k, str):

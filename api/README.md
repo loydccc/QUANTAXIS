@@ -17,7 +17,7 @@ This is a local MVP HTTP API that can:
 - `GET /latest/manifest`
 - `GET /reports/{run_id}/manifest`
 - `GET /reports/{run_id}/file/{name}`
-- `POST /run` (JSON body config)
+- `POST /run` (JSON body config; requires `data_version_id` + `manifest_sha256`)
 - `GET /runs/{job_id}`
 
 ## Security
