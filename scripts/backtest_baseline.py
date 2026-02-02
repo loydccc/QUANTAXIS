@@ -435,14 +435,35 @@ def audit_from_close_panel(close: pd.DataFrame) -> Dict:
 
 
 def write_outputs(outdir: Path, equity: pd.Series, positions: pd.DataFrame, stats: Dict) -> None:
+    """Write artifacts.
+
+    Policy:
+    - Keep legacy CSV names for compatibility.
+    - Also write parquet-first standardized artifacts for downstream tooling.
+    """
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # Standard run metadata (lightweight): use the same payload as metrics for now.
+    # This keeps us on the "artifact spec" track without inventing a new framework.
+    (outdir / "run.json").write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
     (outdir / "metrics.json").write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    equity_df = pd.DataFrame({"date": equity.index, "equity": equity.values})
+    # Legacy
     pd.DataFrame({"date": equity.index.strftime("%Y-%m-%d"), "equity": equity.values}).to_csv(
         outdir / "equity.csv", index=False
     )
+    # Standard
+    equity_df.to_parquet(outdir / "equity_curve.parquet", index=False)
+
     pos = positions.copy()
-    pos.insert(0, "date", pos.index.strftime("%Y-%m-%d"))
-    pos.to_csv(outdir / "positions.csv", index=False)
+    pos.insert(0, "date", pos.index)
+    # Legacy
+    pos_legacy = pos.copy()
+    pos_legacy["date"] = pos_legacy["date"].dt.strftime("%Y-%m-%d")
+    pos_legacy.to_csv(outdir / "positions.csv", index=False)
+    # Standard
+    pos.to_parquet(outdir / "positions.parquet", index=False)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
