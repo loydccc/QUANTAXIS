@@ -22,7 +22,7 @@ This is a local MVP HTTP API that can:
 
 ## Security
 
-This is not hardened (no auth). Keep it local.
+This is not hardened (beyond basic token auth and local-process safety knobs). Keep it local.
 
 
 ## Auth (recommended)

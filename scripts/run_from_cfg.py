@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -37,6 +38,39 @@ def sh(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
 
+def _git_commit() -> str:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+        return out.decode("utf-8").strip()
+    except Exception:
+        return "unknown"
+
+
+def _write_run_meta(result_path: Optional[str], cfg: Dict[str, Any], result_obj: Dict[str, Any]) -> None:
+    """Write a minimal reproducibility envelope next to --result JSON.
+
+    This is intentionally lightweight (not a full framework): it records
+    the config, code version, and (if provided) data version fingerprints.
+    """
+    if not result_path:
+        return
+    rp = Path(result_path)
+    run_meta_path = rp.with_suffix(".run.json")
+
+    meta = {
+        "run_id": result_obj.get("run_id"),
+        "report_dir": result_obj.get("report_dir"),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "strategy": cfg.get("strategy"),
+        "config": cfg,
+        "code": {"git_commit": _git_commit()},
+        # optional (populate these in cfg as we migrate to versioned data snapshots)
+        "data": {
+            "data_version_id": cfg.get("data_version_id"),
+            "manifest_sha256": cfg.get("manifest_sha256"),
+        },
+    }
+    run_meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def newest_report_dir() -> str:
@@ -99,6 +133,7 @@ def main() -> int:
             rp = Path(args.result)
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(json.dumps(result_obj, indent=2, ensure_ascii=False), encoding='utf-8')
+            _write_run_meta(args.result, cfg, result_obj)
         print(json.dumps(result_obj, ensure_ascii=False))
         return 0
 
@@ -119,6 +154,7 @@ def main() -> int:
             rp = Path(args.result)
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(json.dumps(result_obj, indent=2, ensure_ascii=False), encoding='utf-8')
+            _write_run_meta(args.result, cfg, result_obj)
         print(json.dumps(result_obj, ensure_ascii=False))
         return 0
 
