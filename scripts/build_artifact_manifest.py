@@ -52,6 +52,8 @@ DEFAULT_ALLOW = {
     "artifact_manifest.json",
     # standardized parquet
     "equity_curve.parquet",
+    "returns.parquet",
+    "turnover.parquet",
     "positions.parquet",
     "trades.parquet",
     # legacy compat

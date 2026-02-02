@@ -434,7 +434,14 @@ def audit_from_close_panel(close: pd.DataFrame) -> Dict:
     }
 
 
-def write_outputs(outdir: Path, equity: pd.Series, positions: pd.DataFrame, stats: Dict) -> None:
+def write_outputs(
+    outdir: Path,
+    equity: pd.Series,
+    positions: pd.DataFrame,
+    stats: Dict,
+    turnover: pd.Series,
+    net_ret: pd.Series,
+) -> None:
     """Write artifacts.
 
     Policy:
@@ -455,6 +462,14 @@ def write_outputs(outdir: Path, equity: pd.Series, positions: pd.DataFrame, stat
     )
     # Standard
     equity_df.to_parquet(outdir / "equity_curve.parquet", index=False)
+
+    # Standard: daily series needed for analysis and later trading loop alignment
+    pd.DataFrame({"date": net_ret.index, "net_ret": net_ret.values}).to_parquet(
+        outdir / "returns.parquet", index=False
+    )
+    pd.DataFrame({"date": turnover.index, "turnover": turnover.values}).to_parquet(
+        outdir / "turnover.parquet", index=False
+    )
 
     pos = positions.copy()
     pos.insert(0, "date", pos.index)
@@ -619,7 +634,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     outdir = Path(args.outdir)
-    write_outputs(outdir, equity, positions, stats)
+    write_outputs(outdir, equity, positions, stats, turnover=turnover, net_ret=net_ret)
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     return 0
 
