@@ -27,15 +27,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-def sh(cmd: list[str]) -> None:
+def sh(cmd: list[str], env: Optional[Dict[str, str]] = None) -> None:
     print('[run_from_cfg] ' + ' '.join(cmd))
-    subprocess.check_call(cmd)
+    if env:
+        merged = os.environ.copy()
+        merged.update({k: v for k, v in env.items() if v is not None})
+        subprocess.check_call(cmd, env=merged)
+    else:
+        subprocess.check_call(cmd)
 
 
 def _git_commit() -> str:
@@ -125,7 +131,14 @@ def main() -> int:
         minbars = str(cfg.get('min_bars') or 800)
         vol_window = str(cfg.get('vol_window') or 20)
         max_weight = str(cfg.get('max_weight') or 0.10)
-        sh(['./scripts/run_baseline_backtest.sh', start, end, theme, strategy, lookback, topk, ma, cost_bps, minbars, vol_window, max_weight])
+        sh(
+            ['./scripts/run_baseline_backtest.sh', start, end, theme, strategy, lookback, topk, ma, cost_bps, minbars, vol_window, max_weight],
+            env={
+                "QUANTAXIS_DATA_VERSION_ID": str(cfg.get("data_version_id") or ""),
+                "QUANTAXIS_MANIFEST_SHA256": str(cfg.get("manifest_sha256") or ""),
+                "QUANTAXIS_REQUIRE_SNAPSHOT": "1",
+            },
+        )
         report_dir = newest_report_dir()
         run_id = Path(report_dir).name if report_dir else None
         result_obj = {'run_id': run_id, 'report_dir': report_dir}
@@ -144,9 +157,23 @@ def main() -> int:
         topk = str(cfg.get('topk') or 10)
         quantile = cfg.get('quantile')
         if quantile is None or quantile == '' or str(quantile) == 'None':
-            sh(['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, '', cost_bps])
+            sh(
+                ['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, '', cost_bps],
+                env={
+                    "QUANTAXIS_DATA_VERSION_ID": str(cfg.get("data_version_id") or ""),
+                    "QUANTAXIS_MANIFEST_SHA256": str(cfg.get("manifest_sha256") or ""),
+                    "QUANTAXIS_REQUIRE_SNAPSHOT": "1",
+                },
+            )
         else:
-            sh(['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, str(quantile), cost_bps])
+            sh(
+                ['./scripts/run_factor_portfolio_backtest.sh', start, end, theme, factor, reb, direction, topk, str(quantile), cost_bps],
+                env={
+                    "QUANTAXIS_DATA_VERSION_ID": str(cfg.get("data_version_id") or ""),
+                    "QUANTAXIS_MANIFEST_SHA256": str(cfg.get("manifest_sha256") or ""),
+                    "QUANTAXIS_REQUIRE_SNAPSHOT": "1",
+                },
+            )
         report_dir = newest_report_dir()
         run_id = Path(report_dir).name if report_dir else None
         result_obj = {'run_id': run_id, 'report_dir': report_dir}

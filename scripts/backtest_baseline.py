@@ -8,7 +8,8 @@ Supports strategies:
 3) ts_ma_weekly: time-series MA filter per-asset, weekly rebalance, long-only.
 
 Data source:
-- MongoDB collection: stock_day
+- Prefer **versioned local snapshot**: bars.parquet + manifest.json (reproducible)
+- Fallback (legacy): MongoDB collection stock_day
 - Fields: code, date (YYYY-MM-DD), close, vol/volume/amount (for liquidity filter)
 
 Outputs (written to outdir):
@@ -33,11 +34,99 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
 import pymongo
+
+
+def _sha256_file(p: Path, chunk: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _canonical_json_bytes(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _sha256_json(obj: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(obj)).hexdigest()
+
+
+def _load_snapshot_bars(snapshot_dir: str, data_version_id: str, manifest_sha256: str) -> pd.DataFrame:
+    """Load bars from a versioned snapshot directory and verify manifest/file hashes."""
+    sdir = Path(snapshot_dir)
+    mp = sdir / "manifest.json"
+    bp = sdir / "bars.parquet"
+    if not mp.exists() or not bp.exists():
+        raise RuntimeError(f"snapshot dir missing manifest.json or bars.parquet: {sdir}")
+
+    manifest = json.loads(mp.read_text(encoding="utf-8"))
+    # verify manifest sha
+    calc_msha = _sha256_json({k: v for k, v in manifest.items() if k != "manifest_sha256"})
+    if calc_msha != manifest.get("manifest_sha256"):
+        raise RuntimeError("manifest self-hash mismatch")
+    if manifest_sha256 and manifest.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("manifest_sha256 does not match request")
+    if data_version_id and manifest.get("data_version_id") != data_version_id:
+        raise RuntimeError("data_version_id does not match request")
+
+    # verify file hash
+    want_files = manifest.get("files") or []
+    want_hash = None
+    for f in want_files:
+        if (f.get("path") or "").endswith("bars.parquet"):
+            want_hash = f.get("sha256")
+            break
+    if want_hash:
+        got_hash = _sha256_file(bp)
+        if got_hash != want_hash:
+            raise RuntimeError("bars.parquet sha256 mismatch")
+
+    df = pd.read_parquet(bp)
+    return df
+
+
+def _panel_from_snapshot(bars: pd.DataFrame, codes: List[str], start: str, end: str) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[str]]:
+    if bars.empty:
+        raise RuntimeError("empty bars snapshot")
+
+    # normalize
+    if "vol" in bars.columns and "volume" not in bars.columns:
+        bars["volume"] = bars["vol"]
+
+    bars = bars.copy()
+    bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
+    bars = bars.dropna(subset=["date", "code", "close"])
+    bars["code"] = bars["code"].astype(str).str.zfill(6)
+
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+
+    bars = bars[(bars["date"] >= start_dt) & (bars["date"] <= end_dt) & (bars["code"].isin(codes))]
+    if bars.empty:
+        raise RuntimeError("no data found in snapshot for selected universe")
+
+    close_panel = bars.pivot(index="date", columns="code", values="close").sort_index()
+
+    # choose a liquidity field if possible
+    vol_panel = None
+    volume_field = None
+    if "volume" in bars.columns:
+        volume_field = "volume"
+        vol_panel = bars.pivot(index="date", columns="code", values="volume").sort_index()
+    elif "amount" in bars.columns:
+        volume_field = "amount"
+        vol_panel = bars.pivot(index="date", columns="code", values="amount").sort_index()
+
+    return close_panel, vol_panel, volume_field
 
 
 @dataclass
@@ -376,22 +465,48 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--liq-window", type=int, default=0, help="recent trading days window for close+volume eligibility (0 disables)")
     ap.add_argument("--liq-min-ratio", type=float, default=1.0, help="min fraction of days in window that must have valid close and volume>0")
     ap.add_argument("--outdir", default="/tmp/output")
+
+    # reproducible snapshot inputs (preferred)
+    ap.add_argument("--snapshot-dir", default=None, help="dir containing bars.parquet + manifest.json")
+    ap.add_argument("--data-version-id", default=os.getenv("QUANTAXIS_DATA_VERSION_ID", ""), help="e.g. qa_cn_stock_daily@2026-02-01")
+    ap.add_argument("--manifest-sha256", default=os.getenv("QUANTAXIS_MANIFEST_SHA256", ""), help="64-hex manifest sha")
+    ap.add_argument("--require-snapshot", default=os.getenv("QUANTAXIS_REQUIRE_SNAPSHOT", "0"), help="1 to forbid Mongo fallback")
+
     args = ap.parse_args(argv)
 
     start = norm_date(args.start)
     end = norm_date(args.end)
 
     codes = load_universe(args.theme)
-    cfg = get_mongo_cfg()
-    client = mongo_client(cfg)
-    db = client[cfg.db]
-    coll = db["stock_day"]
 
-    volume_field = detect_volume_field(coll)
-    close_raw, vol_raw = fetch_panel(coll, codes, start, end, volume_field=volume_field)
-    close_raw = close_raw.sort_index()
-    if vol_raw is not None:
-        vol_raw = vol_raw.sort_index()
+    require_snapshot = str(args.require_snapshot).strip() in {"1", "true", "yes"}
+
+    # Prefer snapshot (reproducible)
+    close_raw: pd.DataFrame
+    vol_raw: Optional[pd.DataFrame]
+    volume_field: Optional[str]
+
+    if args.snapshot_dir:
+        bars = _load_snapshot_bars(
+            snapshot_dir=str(args.snapshot_dir),
+            data_version_id=str(args.data_version_id or ""),
+            manifest_sha256=str(args.manifest_sha256 or ""),
+        )
+        close_raw, vol_raw, volume_field = _panel_from_snapshot(bars, codes, start, end)
+    else:
+        if require_snapshot:
+            raise RuntimeError("snapshot required but --snapshot-dir not provided")
+        # Legacy fallback: MongoDB
+        cfg = get_mongo_cfg()
+        client = mongo_client(cfg)
+        db = client[cfg.db]
+        coll = db["stock_day"]
+
+        volume_field = detect_volume_field(coll)
+        close_raw, vol_raw = fetch_panel(coll, codes, start, end, volume_field=volume_field)
+        close_raw = close_raw.sort_index()
+        if vol_raw is not None:
+            vol_raw = vol_raw.sort_index()
 
     # Universe eligibility: require enough bars to support indicators/weekly rebalance.
     bars_per_code = close_raw.notna().sum(axis=0).astype(int)
@@ -457,7 +572,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             "vol_window": int(args.vol_window),
             "max_weight": float(args.max_weight),
         },
-        "data": {"collection": "stock_day", "price": "close", "liquidity": volume_field, "adjustment": "none"},
+        "data": {
+            "source": "snapshot" if args.snapshot_dir else "mongo",
+            "data_version_id": str(args.data_version_id or "") if args.snapshot_dir else None,
+            "manifest_sha256": str(args.manifest_sha256 or "") if args.snapshot_dir else None,
+            "collection": "stock_day" if not args.snapshot_dir else None,
+            "price": "close",
+            "liquidity": volume_field,
+            "adjustment": "none",
+        },
     }
 
     stats.update(

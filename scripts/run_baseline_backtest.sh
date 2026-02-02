@@ -35,11 +35,40 @@ mkdir -p "$OUTDIR_HOST"
 
 docker cp scripts/backtest_baseline.py ${CONTAINER}:/tmp/backtest_baseline.py
 
+# Snapshot provenance (required when triggered via run_from_cfg/API)
+DATA_VERSION_ID=${QUANTAXIS_DATA_VERSION_ID:-""}
+MANIFEST_SHA256=${QUANTAXIS_MANIFEST_SHA256:-""}
+REQUIRE_SNAPSHOT=${QUANTAXIS_REQUIRE_SNAPSHOT:-"0"}
+
+SNAPSHOT_DIR_IN_CONTAINER=""
+if [[ "$REQUIRE_SNAPSHOT" == "1" ]]; then
+  if [[ -z "$DATA_VERSION_ID" || -z "$MANIFEST_SHA256" ]]; then
+    echo "[baseline] missing QUANTAXIS_DATA_VERSION_ID or QUANTAXIS_MANIFEST_SHA256" >&2
+    exit 2
+  fi
+  ASOF="${DATA_VERSION_ID#*@}"
+  SRC_DIR="data/qa_cn_stock_daily/versions/${ASOF}"
+  if [[ ! -f "${SRC_DIR}/bars.parquet" || ! -f "${SRC_DIR}/manifest.json" ]]; then
+    echo "[baseline] snapshot not found: ${SRC_DIR} (run export_cn_stock_daily_snapshot.py first)" >&2
+    exit 2
+  fi
+  SNAPSHOT_DIR_IN_CONTAINER="/tmp/qa_cn_stock_daily_snapshot"
+  docker exec ${CONTAINER} rm -rf "${SNAPSHOT_DIR_IN_CONTAINER}" || true
+  docker exec ${CONTAINER} mkdir -p "${SNAPSHOT_DIR_IN_CONTAINER}" || true
+  docker cp "${SRC_DIR}/bars.parquet" ${CONTAINER}:"${SNAPSHOT_DIR_IN_CONTAINER}/bars.parquet"
+  docker cp "${SRC_DIR}/manifest.json" ${CONTAINER}:"${SNAPSHOT_DIR_IN_CONTAINER}/manifest.json"
+fi
+
 docker exec ${CONTAINER} python /tmp/backtest_baseline.py \
   --start "$START" --end "$END" --theme "$THEME" --strategy "$STRATEGY" \
   --lookback "$LOOKBACK" --top "$TOPK" --ma "$MA" --cost-bps "$COST_BPS" --min-bars "$MIN_BARS" \
   --vol-window "$VOL_WINDOW" --max-weight "$MAX_WEIGHT" \
-  --outdir /tmp/output | tee "${OUTDIR_HOST}/console.txt"
+  --outdir /tmp/output \
+  ${SNAPSHOT_DIR_IN_CONTAINER:+--snapshot-dir "$SNAPSHOT_DIR_IN_CONTAINER"} \
+  ${DATA_VERSION_ID:+--data-version-id "$DATA_VERSION_ID"} \
+  ${MANIFEST_SHA256:+--manifest-sha256 "$MANIFEST_SHA256"} \
+  ${REQUIRE_SNAPSHOT:+--require-snapshot "$REQUIRE_SNAPSHOT"} \
+  | tee "${OUTDIR_HOST}/console.txt"
 
 # Copy artifacts back
 
