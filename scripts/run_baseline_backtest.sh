@@ -72,9 +72,19 @@ docker exec ${CONTAINER} python /tmp/backtest_baseline.py \
 
 # Copy artifacts back
 
+docker cp ${CONTAINER}:/tmp/output/run.json "${OUTDIR_HOST}/run.json" || true
+
 docker cp ${CONTAINER}:/tmp/output/metrics.json "${OUTDIR_HOST}/metrics.json"
 docker cp ${CONTAINER}:/tmp/output/equity.csv "${OUTDIR_HOST}/equity.csv"
 docker cp ${CONTAINER}:/tmp/output/positions.csv "${OUTDIR_HOST}/positions.csv"
+docker cp ${CONTAINER}:/tmp/output/trades.csv "${OUTDIR_HOST}/trades.csv" || true
+
+# Standard parquet artifacts
+docker cp ${CONTAINER}:/tmp/output/equity_curve.parquet "${OUTDIR_HOST}/equity_curve.parquet" || true
+docker cp ${CONTAINER}:/tmp/output/positions.parquet "${OUTDIR_HOST}/positions.parquet" || true
+docker cp ${CONTAINER}:/tmp/output/returns.parquet "${OUTDIR_HOST}/returns.parquet" || true
+docker cp ${CONTAINER}:/tmp/output/turnover.parquet "${OUTDIR_HOST}/turnover.parquet" || true
+docker cp ${CONTAINER}:/tmp/output/trades.parquet "${OUTDIR_HOST}/trades.parquet" || true
 
 # Render human-readable summary
 python3 scripts/render_report_summary.py --report "${OUTDIR_HOST}" >/dev/null 2>&1 || true

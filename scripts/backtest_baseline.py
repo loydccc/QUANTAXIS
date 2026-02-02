@@ -380,6 +380,68 @@ def backtest_close_to_close(
     return equity, w_eff, turnover, net
 
 
+def build_trades_from_positions(
+    close: pd.DataFrame,
+    positions: pd.DataFrame,
+    eps: float = 1e-12,
+) -> pd.DataFrame:
+    """Derive a minimal trade blotter from daily target weights.
+
+    Assumptions:
+    - We treat changes in target weights as rebalance trades.
+    - We record weights (not shares). Execution model is outside baseline.
+
+    Output schema (minimal, stable):
+    - date, code, weight_before, weight_after, delta_weight, side, price_close
+    """
+    if positions.empty:
+        return pd.DataFrame(columns=[
+            "date",
+            "code",
+            "weight_before",
+            "weight_after",
+            "delta_weight",
+            "side",
+            "price_close",
+        ])
+
+    pos = positions.fillna(0.0)
+    prev = pos.shift(1).fillna(0.0)
+    delta = pos - prev
+
+    rows = []
+    for dt in pos.index:
+        d = delta.loc[dt]
+        changed = d.abs() > eps
+        if not bool(changed.any()):
+            continue
+        for code in d.index[changed]:
+            w0 = float(prev.at[dt, code])
+            w1 = float(pos.at[dt, code])
+            dw = float(d.at[dt, code])
+            side = "buy" if dw > 0 else "sell"
+            px = None
+            try:
+                if dt in close.index and code in close.columns:
+                    v = close.at[dt, code]
+                    px = None if pd.isna(v) else float(v)
+            except Exception:
+                px = None
+            rows.append(
+                {
+                    "date": dt,
+                    "code": code,
+                    "weight_before": w0,
+                    "weight_after": w1,
+                    "delta_weight": dw,
+                    "side": side,
+                    "price_close": px,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
 def perf_stats(equity: pd.Series, net_ret: pd.Series, turnover: pd.Series) -> Dict:
     n = len(net_ret)
     ann = 252
@@ -438,6 +500,7 @@ def write_outputs(
     outdir: Path,
     equity: pd.Series,
     positions: pd.DataFrame,
+    trades: pd.DataFrame,
     stats: Dict,
     turnover: pd.Series,
     net_ret: pd.Series,
@@ -479,6 +542,30 @@ def write_outputs(
     pos_legacy.to_csv(outdir / "positions.csv", index=False)
     # Standard
     pos.to_parquet(outdir / "positions.parquet", index=False)
+
+    # Trades (standard + optional legacy)
+    if trades is None or trades.empty:
+        # still write empty parquet for schema stability
+        pd.DataFrame(
+            columns=[
+                "date",
+                "code",
+                "weight_before",
+                "weight_after",
+                "delta_weight",
+                "side",
+                "price_close",
+            ]
+        ).to_parquet(outdir / "trades.parquet", index=False)
+    else:
+        t = trades.copy()
+        # standard
+        t.to_parquet(outdir / "trades.parquet", index=False)
+        # legacy (best-effort)
+        t_legacy = t.copy()
+        if "date" in t_legacy.columns:
+            t_legacy["date"] = pd.to_datetime(t_legacy["date"]).dt.strftime("%Y-%m-%d")
+        t_legacy.to_csv(outdir / "trades.csv", index=False)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -590,6 +677,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         weights = compute_weights_ts_ma(close, reb_dates, ma_window=args.ma)
 
     equity, positions, turnover, net_ret = backtest_close_to_close(close, weights, cost_bps=args.cost_bps)
+    trades = build_trades_from_positions(close=close, positions=positions)
 
     stats = perf_stats(equity, net_ret, turnover)
     run_cfg = {
@@ -634,7 +722,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     outdir = Path(args.outdir)
-    write_outputs(outdir, equity, positions, stats, turnover=turnover, net_ret=net_ret)
+    write_outputs(outdir, equity, positions, trades, stats, turnover=turnover, net_ret=net_ret)
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     return 0
 
