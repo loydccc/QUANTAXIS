@@ -329,11 +329,56 @@ def report_manifest(run_id: str):
     return JSONResponse(read_json(p))
 
 
+def _allowed_report_files(run_id: str) -> Optional[set[str]]:
+    """Return allowlist of files for a report directory.
+
+    If artifact_manifest.json exists, we only allow files listed in it.
+    Otherwise, we fall back to a small legacy allowlist.
+    """
+    report_dir = REPORTS_DIR / run_id
+    mp = report_dir / "artifact_manifest.json"
+    if mp.exists():
+        try:
+            obj = read_json(mp)
+            files = obj.get("files") or []
+            names = {str(f.get("name")) for f in files if f.get("name")}
+            return names
+        except Exception:
+            # if manifest is corrupt, safest is to deny
+            return set()
+
+    return {
+        "metrics.json",
+        "run.json",
+        "equity.csv",
+        "positions.csv",
+        "equity_curve.parquet",
+        "positions.parquet",
+        "console.txt",
+        "summary.md",
+        "manifest.json",
+        "artifact_manifest.json",
+    }
+
+
+@app.get("/reports/{run_id}/artifacts")
+def report_artifacts(run_id: str):
+    p = REPORTS_DIR / run_id / "artifact_manifest.json"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="artifact_manifest.json not found")
+    return JSONResponse(read_json(p))
+
+
 @app.get("/reports/{run_id}/file/{name}")
 def report_file(run_id: str, name: str):
     # allowlist simple filenames to reduce path traversal risk
     if "/" in name or ".." in name:
         raise HTTPException(status_code=400, detail="bad filename")
+
+    allowed = _allowed_report_files(run_id)
+    if allowed is not None and name not in allowed:
+        raise HTTPException(status_code=404, detail="file not found")
+
     p = REPORTS_DIR / run_id / name
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="file not found")

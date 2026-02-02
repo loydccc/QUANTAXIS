@@ -16,7 +16,8 @@ This is a local MVP HTTP API that can:
 - `GET /health`
 - `GET /latest/manifest`
 - `GET /reports/{run_id}/manifest`
-- `GET /reports/{run_id}/file/{name}`
+- `GET /reports/{run_id}/artifacts` (artifact_manifest.json)
+- `GET /reports/{run_id}/file/{name}` (only files listed in artifact_manifest.json when present)
 - `POST /run` (JSON body config; requires `data_version_id` + `manifest_sha256`)
 - `GET /runs/{job_id}`
 
