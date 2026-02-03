@@ -41,20 +41,22 @@
 > Goal: produce a **weekly “what to buy” list** (JSON + CSV) for manual execution, optimized for **high win rate** and stability (not just backtest CAGR).
 
 Phase 6.1 (baseline → workflow)
-- [ ] Add signal job store under `output/signals/`
-- [ ] Define signal artifact schema (JSON) + CSV export
-  - required: `as_of_date`, `strategy`, `universe`, `top_k`, `rebalance`, `positions[] (code, weight, rank, score)`
-  - include: data/version fingerprints (universe fingerprint, config signature)
-- [ ] Add API endpoints:
+- [x] Add signal job store under `output/signals/`
+- [x] Define signal artifact schema (JSON) + CSV export
+  - required: `as_of_date`, `strategy`, `theme`, `top_k`, `rebalance`, `positions[] (code, weight, rank, score)`
+  - include: version fingerprints (`meta.config_signature`, `meta.universe_fingerprint`, `meta.universe_size`)
+  - optional: factor attribution (`positions[].factors`, `positions[].zfactors`) and tranche debug info (`meta.tranches`)
+- [x] Add API endpoints:
   - `POST /signals/run` → returns `signal_id` (async)
-  - `GET /signals/{signal_id}` → returns JSON
+  - `GET /signals/{signal_id}` → returns JSON (or status while running)
   - `GET /signals/{signal_id}.csv` → returns CSV
-- [ ] Implement generator for **baseline strategies** (momentum / MA) with **weekly rebalance** and **equal-weight topK**
+  - `GET /signals/{signal_id}_factors.csv` → returns factor attribution CSV
+- [x] Implement generator for **baseline strategies** (momentum / MA) with **weekly rebalance** and **equal-weight topK**
 
 Phase 6.2 (lightweight score → hybrid “c”)
-- [ ] Add a lightweight score/rank aggregator (normalize 1–2 baseline signals into a score)
-- [ ] Export `score` and stable tie-break rules
-- [ ] (Optional) Add 2-tranche overlap for 2-week hold (weekly rebalance, hold 2 weeks)
+- [x] Add a lightweight score/rank aggregator (normalize 1–2 baseline signals into a score)
+- [x] Export `score` and stable tie-break rules
+- [x] (Optional) Add 2-tranche overlap for 2-week hold (weekly rebalance, hold 2 weeks)
 
 Phase 6.3 (factor system path → toward “b”)
 - [ ] Add factor plan + computation contract (winsorize/zscore/missing; optional neutralization)
