@@ -435,8 +435,20 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     if not isinstance(cfg, dict):
         raise HTTPException(status_code=400, detail="config must be a JSON object")
 
-    # size/depth reuse
-    _validate_cfg({"strategy": "demo", **{k: v for k, v in cfg.items() if k != "strategy"}})  # type: ignore[arg-type]
+    # size/depth guards (signals cfg is not a backtest /run cfg; do NOT require data_version_id/manifest_sha256 here)
+    try:
+        raw = json.dumps(cfg, ensure_ascii=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="config must be JSON-serializable")
+    if API_CFG_MAX_BYTES > 0 and len(raw.encode("utf-8")) > API_CFG_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="config too large")
+    if API_CFG_MAX_DEPTH > 0 and _walk_depth(cfg) > API_CFG_MAX_DEPTH:
+        raise HTTPException(status_code=400, detail="config too deeply nested")
+    if len(cfg) > 300:
+        raise HTTPException(status_code=400, detail="config has too many keys")
+    for forbidden in ("cmd", "command", "shell", "cwd", "workdir", "path"):
+        if forbidden in cfg:
+            raise HTTPException(status_code=400, detail=f"forbidden field: {forbidden}")
 
     strategy = cfg.get("strategy")
     theme = cfg.get("theme", "all")
