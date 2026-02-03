@@ -1140,17 +1140,8 @@ def signals_run(cfg: Dict[str, Any], background: BackgroundTasks, request: Reque
     return {"signal_id": signal_id, "status": "queued"}
 
 
-@app.get("/signals/{signal_id}")
-def signals_get(signal_id: str, request: Request):
-    require_token(request)
-    p = SIGNALS_DIR / f"{signal_id}.json"
-    if not p.exists():
-        # maybe still running
-        st = SIGNALS_DIR / f"{signal_id}.status.json"
-        if st.exists():
-            return JSONResponse(read_json(st))
-        raise HTTPException(status_code=404, detail="signal not found")
-    return JSONResponse(read_json(p))
+# NOTE: declare ".csv" routes before the generic "/signals/{signal_id}" route,
+# otherwise "/signals/<id>.csv" may be captured by the generic handler.
 
 
 @app.get("/signals/{signal_id}.csv")
@@ -1169,3 +1160,16 @@ def signals_factors_csv(signal_id: str, request: Request):
     if not p.exists():
         raise HTTPException(status_code=404, detail="factors csv not found")
     return FileResponse(str(p), media_type="text/csv")
+
+
+@app.get("/signals/{signal_id}")
+def signals_get(signal_id: str, request: Request):
+    require_token(request)
+    p = SIGNALS_DIR / f"{signal_id}.json"
+    if not p.exists():
+        # maybe still running
+        st = SIGNALS_DIR / f"{signal_id}.status.json"
+        if st.exists():
+            return JSONResponse(read_json(st))
+        raise HTTPException(status_code=404, detail="signal not found")
+    return JSONResponse(read_json(p))
