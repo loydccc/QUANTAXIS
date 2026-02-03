@@ -167,7 +167,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # naive exchange inference
                 suffix = ".SH" if code6.startswith(("600", "601", "603", "605", "688")) else ".SZ"
                 tmp.append(f"{code6}{suffix}")
-        codes = tmp[: max(1, int(args.limit))] if args.limit else tmp
+        lim = int(args.limit) if args.limit is not None else 0
+        codes = tmp if lim <= 0 else tmp[:lim]
         if not codes:
             print("ERROR: empty codes from stock_list (check collection + theme filter)", file=sys.stderr)
             return 5
