@@ -7,3 +7,6 @@ uvicorn[standard]>=0.27.0,<1.0.0
 # used by signals generation helpers
 pandas>=2.0.0,<3.0.0
 numpy>=1.24.0,<2.0.0
+
+# parquet writing for backtest artifacts (equity_curve.parquet, etc.)
+pyarrow>=14.0.0
