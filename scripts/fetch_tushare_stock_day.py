@@ -86,6 +86,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--start", required=True, help="YYYYMMDD")
     ap.add_argument("--end", required=True, help="YYYYMMDD")
     ap.add_argument("--codes", default=None, help="comma-separated ts_code list, e.g. 000001.SZ,600000.SH")
+    ap.add_argument(
+        "--from-stock-list",
+        action="store_true",
+        help="load codes from Mongo stock_list (expects fields: code, ts_code).",
+    )
+    ap.add_argument(
+        "--theme",
+        default=None,
+        help="optional filter when using --from-stock-list: hs10|cyb20|a_ex_kcb_bse",
+    )
     ap.add_argument("--limit", type=int, default=200, help="limit number of symbols (when --codes not given)")
     ap.add_argument("--sleep", type=float, default=0.15, help="sleep between API calls")
     ap.add_argument("--batch", type=int, default=1, help="codes per request; keep 1 for stability")
@@ -114,9 +124,53 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         pro = ts.pro_api(token)
 
+    def _theme_ok(code6: str, theme: Optional[str]) -> bool:
+        if not theme:
+            return True
+        theme = theme.strip()
+        if theme in {"hs10", "cn_hs10", "a_hs10"}:
+            if code6.startswith(("300", "301", "688")):
+                return False
+            if code6.startswith(("8", "4")):
+                return False
+            return code6.startswith(("600", "601", "603", "605", "000", "001", "002", "003"))
+        if theme in {"cyb20", "cn_cyb20", "a_cyb20"}:
+            return code6.startswith(("300", "301"))
+        if theme in {"a_ex_kcb_bse", "cn_a_ex_kcb_bse", "a_no_kcb_bse"}:
+            if code6.startswith("688"):
+                return False
+            if code6.startswith(("8", "4")):
+                return False
+            return code6.startswith(("600", "601", "603", "605", "000", "001", "002", "003", "300", "301"))
+        return True
+
     # Choose codes
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+    elif args.from_stock_list:
+        cfg = _get_mongo_cfg()
+        client = _mongo_client(cfg)
+        db = client[cfg.db]
+        coll = db["stock_list"]
+        # Prefer ts_code if present; otherwise construct from code with best-effort suffix guess.
+        tmp = []
+        for doc in coll.find({}, {"_id": 0, "code": 1, "ts_code": 1}).sort("code", 1):
+            code6 = str(doc.get("code") or "").zfill(6)
+            if not code6 or not code6.isdigit():
+                continue
+            if not _theme_ok(code6, args.theme):
+                continue
+            tsc = doc.get("ts_code")
+            if isinstance(tsc, str) and "." in tsc:
+                tmp.append(tsc)
+            else:
+                # naive exchange inference
+                suffix = ".SH" if code6.startswith(("600", "601", "603", "605", "688")) else ".SZ"
+                tmp.append(f"{code6}{suffix}")
+        codes = tmp[: max(1, int(args.limit))] if args.limit else tmp
+        if not codes:
+            print("ERROR: empty codes from stock_list (check collection + theme filter)", file=sys.stderr)
+            return 5
     else:
         # stock_basic returns ts_code like 000001.SZ
         try:
