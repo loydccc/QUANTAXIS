@@ -6,9 +6,19 @@ This is a local MVP HTTP API that can:
 
 ## Start
 
+Recommended (lightweight install for API only):
+
 ```bash
+pip3 install -r requirements-api.txt
 ./scripts/run_api.sh
 # default: http://127.0.0.1:8000
+```
+
+Full research stack (heavier; optional):
+
+```bash
+pip3 install -r requirements.txt
+./scripts/run_api.sh
 ```
 
 ## Endpoints
