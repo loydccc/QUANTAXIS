@@ -157,9 +157,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Tushare uses trade_date YYYYMMDD, vol in (hands?), amount in (thousand?) depending; we keep raw.
             records = []
             for r in df.to_dict("records"):
+                ts_code = r.get("ts_code")
+                base_code = None
+                if isinstance(ts_code, str) and ts_code:
+                    base_code = ts_code.split(".")[0]
                 records.append(
                     {
-                        "code": r.get("ts_code"),
+                        # Keep QUANTAXIS-style 6-digit code as primary key for compatibility
+                        "code": base_code or ts_code,
+                        # Preserve original tushare identifier for traceability
+                        "ts_code": ts_code,
                         "date": r.get("trade_date"),
                         "open": r.get("open"),
                         "high": r.get("high"),
