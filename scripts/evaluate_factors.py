@@ -83,8 +83,9 @@ def load_universe(theme: str) -> List[str]:
     """Return the base universe by theme.
 
     Supports special themes derived from Mongo:
-    - hs10: CN沪深主板 10%（排除创业板/科创板/北交所/新三板）
+    - hs10: 沪深主板 10%（排除创业板/科创板/北交所/新三板）
     - cyb20: 创业板 20%（300/301）
+    - a_ex_kcb_bse: 沪深主板 + 创业板（仅排除科创板 688 与北交所/新三板）
     """
 
     theme = (theme or 'all').strip()
@@ -101,7 +102,16 @@ def load_universe(theme: str) -> List[str]:
     def _is_cyb20(code: str) -> bool:
         return bool(code) and len(code) == 6 and code.isdigit() and code.startswith(('300', '301'))
 
-    if theme in {'hs10', 'cn_hs10', 'a_hs10'} or theme in {'cyb20', 'cn_cyb20', 'a_cyb20'}:
+    def _is_a_ex_kcb_bse(code: str) -> bool:
+        if not code or len(code) != 6 or not code.isdigit():
+            return False
+        if code.startswith('688'):
+            return False
+        if code.startswith(('8', '4')):
+            return False
+        return code.startswith(('600', '601', '603', '605', '000', '001', '002', '003', '300', '301'))
+
+    if theme in {'hs10', 'cn_hs10', 'a_hs10'} or theme in {'cyb20', 'cn_cyb20', 'a_cyb20'} or theme in {'a_ex_kcb_bse', 'cn_a_ex_kcb_bse', 'a_no_kcb_bse'}:
         cfg = get_mongo_cfg()
         client = mongo_client(cfg)
         db = client[cfg.db]
@@ -122,7 +132,11 @@ def load_universe(theme: str) -> List[str]:
             for c in db['stock_day'].distinct('code'):
                 if c:
                     codes.add(str(c).zfill(6))
-        return sorted([c for c in codes if (_is_hs10(c) if theme.startswith('hs') else _is_cyb20(c))])
+        if theme.startswith('hs'):
+            return sorted([c for c in codes if _is_hs10(c)])
+        if theme.startswith('cy'):
+            return sorted([c for c in codes if _is_cyb20(c)])
+        return sorted([c for c in codes if _is_a_ex_kcb_bse(c)])
 
     obj = json.loads(Path('watchlists/themes_seed_cn.json').read_text(encoding='utf-8'))
     codes = set()
