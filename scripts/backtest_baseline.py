@@ -204,9 +204,20 @@ def fetch_panel(
     if volume_field:
         proj[volume_field] = 1
 
+    # Mongo `date` field can be stored as either "YYYY-MM-DD" or "YYYYMMDD" (legacy imports).
+    # To avoid silently truncating the panel, query both formats.
+    start2 = start.replace("-", "")
+    end2 = end.replace("-", "")
+
     for code in codes:
         cursor = coll.find(
-            {"code": code, "date": {"$gte": start, "$lte": end}},
+            {
+                "code": code,
+                "$or": [
+                    {"date": {"$gte": start, "$lte": end}},
+                    {"date": {"$gte": start2, "$lte": end2}},
+                ],
+            },
             proj,
         ).sort("date", 1)
         rows = list(cursor)
