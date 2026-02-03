@@ -817,6 +817,63 @@ def _run_baseline_backtest_to_workdir(workdir: Path, cfg: Dict[str, Any], strate
     return as_of_date, picks, stats
 
 
+def _run_baseline_backtest_to_workdir_with_fallback(
+    workdir: Path,
+    cfg: Dict[str, Any],
+    strategy: str,
+) -> tuple[str, list[str], Dict[str, Any], Dict[str, Any]]:
+    """Run baseline backtest with a small, deterministic fallback ladder.
+
+    Goal: avoid hard-failing the product workflow when the strict default filters
+    (min_bars=800, liq_window=20, liq_min_ratio=1.0) eliminate the entire universe
+    for smaller/partial datasets.
+
+    Returns: (as_of_date, picks, stats, cfg_used)
+    """
+
+    def _is_empty_universe_err(msg: str) -> bool:
+        return "no eligible codes after filters" in (msg or "")
+
+    attempts: list[Dict[str, Any]] = []
+
+    # Copy once; we will mutate per-attempt.
+    base = dict(cfg)
+
+    # Fallback ladder (in order):
+    # 1) disable liquidity window filter
+    # 2) reduce min_bars to 250
+    # 3) reduce min_bars to 120
+    ladder: list[Dict[str, Any]] = [
+        {},
+        {"liq_window": 0},
+        {"liq_window": 0, "min_bars": min(int(base.get("min_bars", 800)), 250)},
+        {"liq_window": 0, "min_bars": min(int(base.get("min_bars", 800)), 120)},
+    ]
+
+    last_err: Exception | None = None
+    for i, patch in enumerate(ladder, start=1):
+        cfg_try = dict(base)
+        cfg_try.update(patch)
+        try:
+            as_of_date, picks, stats = _run_baseline_backtest_to_workdir(workdir, cfg_try, strategy)
+            # annotate stats so the signal JSON can reflect what happened
+            stats = dict(stats)
+            stats["auto_relax"] = attempts
+            return as_of_date, picks, stats, cfg_try
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            attempts.append({"attempt": i, "patch": patch, "error": (msg[-400:] if msg else repr(e))})
+            # only relax for the empty-universe error; otherwise bubble up.
+            if not _is_empty_universe_err(msg):
+                raise
+            continue
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("run failed")
+
+
 def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     """Generate a weekly topK signal as JSON+CSV under output/signals/."""
     status_path = SIGNALS_DIR / f"{signal_id}.status.json"
@@ -841,6 +898,9 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
+    # cfg used for the successful run (may be auto-relaxed)
+    cfg_used: Dict[str, Any] = dict(cfg)
+
     # hard thresholds (cfg override > env default)
     hard_vol_20d_max = float(cfg.get("hard_vol_20d_max", HARD_VOL_20D_MAX))
     hard_liq_20d_min = float(cfg.get("hard_liq_20d_min", HARD_LIQ_20D_MIN))
@@ -850,12 +910,16 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             # 1) momentum topK
             mom_dir = workdir / "mom"
             mom_dir.mkdir(parents=True, exist_ok=True)
-            mom_date, mom_picks, mom_stats = _run_baseline_backtest_to_workdir(mom_dir, cfg, "xsec_momentum_weekly_topk")
+            mom_date, mom_picks, mom_stats, cfg_used = _run_baseline_backtest_to_workdir_with_fallback(
+                mom_dir, cfg, "xsec_momentum_weekly_topk"
+            )
 
             # 2) MA filter (acts like a breadth filter)
             ma_dir = workdir / "ma"
             ma_dir.mkdir(parents=True, exist_ok=True)
-            ma_date, ma_picks, ma_stats = _run_baseline_backtest_to_workdir(ma_dir, cfg, "ts_ma_weekly")
+            ma_date, ma_picks, ma_stats, cfg_used = _run_baseline_backtest_to_workdir_with_fallback(
+                ma_dir, cfg_used, "ts_ma_weekly"
+            )
 
             # tranche overlap extraction
             import pandas as pd
@@ -1008,7 +1072,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
         else:
             # baseline single-strategy signal
-            base_date, base_picks, stats = _run_baseline_backtest_to_workdir(workdir, cfg, strategy)
+            base_date, base_picks, stats, cfg_used = _run_baseline_backtest_to_workdir_with_fallback(workdir, cfg, strategy)
             # tranche overlap for baseline
             tr = _extract_last_tranches_from_positions_csv(workdir / "positions.csv", n=max(hold_weeks, 1))
             n_tr = 1 if not tranche_overlap or hold_weeks <= 1 else min(2, hold_weeks)
@@ -1059,16 +1123,23 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "tranches": tranche_objs,
             }
         # version signature for reproducibility
+        # If we had to auto-relax filters, reflect the *effective* values in the signal meta.
+        min_bars_eff = int(cfg_used.get("min_bars", min_bars))
+        liq_window_eff = int(cfg_used.get("liq_window", liq_window))
+        liq_min_ratio_eff = float(cfg_used.get("liq_min_ratio", liq_min_ratio))
+
         meta_base = {
             "strategy": strategy,
             "theme": theme,
             "top_k": top_k,
             "rebalance": "weekly",
-            "min_bars": min_bars,
-            "liq_window": liq_window,
-            "liq_min_ratio": liq_min_ratio,
+            "min_bars": min_bars_eff,
+            "liq_window": liq_window_eff,
+            "liq_min_ratio": liq_min_ratio_eff,
             "lookback": lookback,
             "ma": ma,
+            # include auto-relax trace (if any) for transparency
+            "auto_relax": stats.get("auto_relax") if isinstance(stats, dict) else None,
             **meta_extra,
         }
         meta_sig = json.dumps(meta_base, sort_keys=True, ensure_ascii=False)
