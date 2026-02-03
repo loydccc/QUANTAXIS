@@ -46,9 +46,18 @@ if [[ -n "${CODES}" ]]; then
   EXTRA_ARGS+=(--codes "${CODES}")
 fi
 
-docker exec \
-  -e TUSHARE_TOKEN \
-  -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
-  -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
-  ${CONTAINER} \
-  python /app/scripts/fetch_tushare_stock_day.py --start "${START}" --end "${END}" --limit "${LIMIT}" "${EXTRA_ARGS[@]}"
+if ((${#EXTRA_ARGS[@]})); then
+  docker exec \
+    -e TUSHARE_TOKEN \
+    -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
+    -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
+    ${CONTAINER} \
+    python /app/scripts/fetch_tushare_stock_day.py --start "${START}" --end "${END}" --limit "${LIMIT}" "${EXTRA_ARGS[@]}"
+else
+  docker exec \
+    -e TUSHARE_TOKEN \
+    -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
+    -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
+    ${CONTAINER} \
+    python /app/scripts/fetch_tushare_stock_day.py --start "${START}" --end "${END}" --limit "${LIMIT}"
+fi
