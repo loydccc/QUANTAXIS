@@ -102,15 +102,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: tushare not installed in this environment: {e}", file=sys.stderr)
         return 3
 
-    pro = ts.pro_api(token)
-
     # Optional: support self-hosted/proxied Tushare DataApi endpoint.
     # Some users have a forwarding endpoint + token that works even when official permissions are limited.
     http_url = os.getenv("TUSHARE_HTTP_URL", "").strip()
     if http_url:
+        # Follow the proxy pattern: pro_api arg can be a dummy; then override private fields.
+        pro = ts.pro_api("DUMMY")
         # NOTE: Tushare uses name-mangled private attributes.
         pro._DataApi__token = token  # type: ignore[attr-defined]
         pro._DataApi__http_url = http_url  # type: ignore[attr-defined]
+    else:
+        pro = ts.pro_api(token)
 
     # Choose codes
     if args.codes:
