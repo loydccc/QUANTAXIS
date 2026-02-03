@@ -49,6 +49,7 @@ fi
 if ((${#EXTRA_ARGS[@]})); then
   docker exec \
     -e TUSHARE_TOKEN \
+    -e TUSHARE_HTTP_URL \
     -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
     -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
     ${CONTAINER} \
@@ -56,6 +57,7 @@ if ((${#EXTRA_ARGS[@]})); then
 else
   docker exec \
     -e TUSHARE_TOKEN \
+    -e TUSHARE_HTTP_URL \
     -e MONGODB_HOST -e MONGODB_PORT -e MONGODB_DATABASE -e MONGODB_USER -e MONGODB_PASSWORD \
     -e MONGO_ROOT_USER -e MONGO_ROOT_PASSWORD \
     ${CONTAINER} \

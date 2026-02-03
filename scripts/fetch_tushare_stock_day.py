@@ -104,6 +104,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     pro = ts.pro_api(token)
 
+    # Optional: support self-hosted/proxied Tushare DataApi endpoint.
+    # Some users have a forwarding endpoint + token that works even when official permissions are limited.
+    http_url = os.getenv("TUSHARE_HTTP_URL", "").strip()
+    if http_url:
+        # NOTE: Tushare uses name-mangled private attributes.
+        pro._DataApi__token = token  # type: ignore[attr-defined]
+        pro._DataApi__http_url = http_url  # type: ignore[attr-defined]
+
     # Choose codes
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
