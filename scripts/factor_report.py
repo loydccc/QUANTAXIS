@@ -84,15 +84,85 @@ def mongo_client(cfg: MongoCfg) -> pymongo.MongoClient:
 
 
 def load_universe(theme: str) -> List[str]:
-    # Reuse the same theme logic as backtest_baseline.py
-    import importlib.util
+    """Load universe codes.
 
-    p = ROOT / "scripts" / "backtest_baseline.py"
-    spec = importlib.util.spec_from_file_location("_qa_bt", str(p))
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore
-    return list(mod.load_universe(theme))
+    Keep this logic aligned with scripts/backtest_baseline.py, but avoid importing that
+    module dynamically (can be fragile across Python envs).
+
+    - Curated themes come from watchlists/themes_seed_cn.json
+    - Special themes are derived from Mongo stock_list/stock_day.
+    """
+
+    theme = (theme or "all").strip()
+
+    def _is_a_ex_kcb_bse(code: str) -> bool:
+        if not code or len(code) != 6 or not code.isdigit():
+            return False
+        if code.startswith("688"):
+            return False
+        if code.startswith(("8", "4")):
+            return False
+        return code.startswith(("600", "601", "603", "605", "000", "001", "002", "003", "300", "301"))
+
+    def _is_hs10(code: str) -> bool:
+        if not code or len(code) != 6 or not code.isdigit():
+            return False
+        if code.startswith(("300", "301", "688")):
+            return False
+        if code.startswith(("8", "4")):
+            return False
+        return code.startswith(("600", "601", "603", "605", "000", "001", "002", "003"))
+
+    def _is_cyb20(code: str) -> bool:
+        return bool(code) and len(code) == 6 and code.isdigit() and code.startswith(("300", "301"))
+
+    special = {
+        "hs10",
+        "cn_hs10",
+        "a_hs10",
+        "cyb20",
+        "cn_cyb20",
+        "a_cyb20",
+        "a_ex_kcb_bse",
+        "cn_a_ex_kcb_bse",
+        "a_no_kcb_bse",
+    }
+
+    if theme in special:
+        cfg = get_mongo_cfg()
+        client = mongo_client(cfg)
+        db = client[cfg.db]
+
+        codes: set[str] = set()
+        coll = db.get_collection("stock_list")
+        try:
+            n = coll.estimated_document_count()
+        except Exception:
+            n = 0
+
+        if n and n > 0:
+            for doc in coll.find({}, {"_id": 0, "code": 1}):
+                c = doc.get("code")
+                if c:
+                    codes.add(str(c).zfill(6))
+        else:
+            for c in db["stock_day"].distinct("code"):
+                if c:
+                    codes.add(str(c).zfill(6))
+
+        if theme.startswith("hs"):
+            return sorted([c for c in codes if _is_hs10(c)])
+        if theme.startswith("cy"):
+            return sorted([c for c in codes if _is_cyb20(c)])
+        return sorted([c for c in codes if _is_a_ex_kcb_bse(c)])
+
+    obj = json.loads((ROOT / "watchlists" / "themes_seed_cn.json").read_text(encoding="utf-8"))
+    codes = set()
+    for t in obj["themes"]:
+        if theme == "all" or t["theme"] == theme:
+            for c in t["seed_codes"]:
+                codes.add(str(c).zfill(6))
+    return sorted(codes)
 
 
 def detect_liq_field(coll: pymongo.collection.Collection) -> Optional[str]:
