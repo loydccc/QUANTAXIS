@@ -419,7 +419,7 @@ def build_trades_from_positions(
         for code in d.index[changed]:
             w0 = float(prev.at[dt, code])
             w1 = float(pos.at[dt, code])
-            dw = float(d.at[dt, code])
+            dw = float(d.at[code])
             side = "buy" if dw > 0 else "sell"
             px = None
             try:
