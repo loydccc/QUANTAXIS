@@ -42,6 +42,9 @@
 
 Phase 6.1 (baseline → workflow)
 - [x] Add signal job store under `output/signals/`
+- [ ] Universe expansion: add market-segment themes
+  - `hs10`: 沪深主板 10%（暂不含北交所/新三板；排除创业板/科创板）
+  - `cyb20`: 创业板 20%（300/301；暂不含北交所/新三板）
 - [x] Define signal artifact schema (JSON) + CSV export
   - required: `as_of_date`, `strategy`, `theme`, `top_k`, `rebalance`, `positions[] (code, weight, rank, score)`
   - include: version fingerprints (`meta.config_signature`, `meta.universe_fingerprint`, `meta.universe_size`)

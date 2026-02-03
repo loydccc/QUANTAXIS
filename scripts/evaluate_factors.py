@@ -80,6 +80,50 @@ def norm_date(s: str) -> str:
 
 
 def load_universe(theme: str) -> List[str]:
+    """Return the base universe by theme.
+
+    Supports special themes derived from Mongo:
+    - hs10: CN沪深主板 10%（排除创业板/科创板/北交所/新三板）
+    - cyb20: 创业板 20%（300/301）
+    """
+
+    theme = (theme or 'all').strip()
+
+    def _is_hs10(code: str) -> bool:
+        if not code or len(code) != 6 or not code.isdigit():
+            return False
+        if code.startswith(('300', '301', '688')):
+            return False
+        if code.startswith(('8', '4')):
+            return False
+        return code.startswith(('600', '601', '603', '605', '000', '001', '002', '003'))
+
+    def _is_cyb20(code: str) -> bool:
+        return bool(code) and len(code) == 6 and code.isdigit() and code.startswith(('300', '301'))
+
+    if theme in {'hs10', 'cn_hs10', 'a_hs10'} or theme in {'cyb20', 'cn_cyb20', 'a_cyb20'}:
+        cfg = get_mongo_cfg()
+        client = mongo_client(cfg)
+        db = client[cfg.db]
+        codes: set[str] = set()
+        coll = db.get_collection('stock_list')
+        try:
+            n = coll.estimated_document_count()
+        except Exception:
+            n = 0
+        if n and n > 0:
+            for doc in coll.find({}, {'_id': 0, 'code': 1, 'ts_code': 1}):
+                c = doc.get('code')
+                if not c and doc.get('ts_code'):
+                    c = str(doc.get('ts_code')).split('.')[0]
+                if c:
+                    codes.add(str(c).zfill(6))
+        else:
+            for c in db['stock_day'].distinct('code'):
+                if c:
+                    codes.add(str(c).zfill(6))
+        return sorted([c for c in codes if (_is_hs10(c) if theme.startswith('hs') else _is_cyb20(c))])
+
     obj = json.loads(Path('watchlists/themes_seed_cn.json').read_text(encoding='utf-8'))
     codes = set()
     for t in obj['themes']:
