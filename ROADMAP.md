@@ -65,7 +65,10 @@ Phase 6.2 (lightweight score → hybrid “c”)
 Phase 6.3 (factor system path → toward “b”)
 - [ ] Add factor plan + computation contract (winsorize/zscore/missing; optional neutralization)
 - [ ] Implement initial 8–12 factors (grouped: momentum, reversal, flow, risk+tradability)
-- [ ] Extend score to support factor-based ranking (multi-factor)
-- [ ] Factor evaluation fixed outputs (RankIC, stratified returns, decay, turnover, cost sensitivity)
+- [x] Extend score to support factor-based ranking (multi-factor)  # (already in API: score_mode=factor)
+- [ ] **Factor evaluation fixed outputs** (RankIC, stratified/decile returns, decay, correlations)
+  - [ ] Baseline report for current factor pack (ret_10d/ret_20d/vol_20d/liq_20d) on `theme=a_ex_kcb_bse`
+  - [ ] Use report to propose tuned weights / factor set changes
+  - [ ] Re-run signals + walk-forward validation after each change
 - [ ] Portfolio constraints fixed (liquidity, single-name cap, sector cap, cost model)
 - [ ] Plug factor eval outputs / factor-bt signals as optional inputs
