@@ -235,12 +235,38 @@ def fetch_panel(
     return close_panel, vol_panel
 
 
-def pick_weekly_rebalance_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
-    iso = index.isocalendar()
-    df = pd.DataFrame({"year": iso.year.values, "week": iso.week.values}, index=index)
-    # pandas<2.1 does not support include_groups kwarg in groupby.apply
-    last_dates = df.groupby(["year", "week"], sort=True).apply(lambda x: x.index.max())
-    return list(pd.to_datetime(last_dates.values))
+def pick_weekly_rebalance_dates(index: pd.DatetimeIndex, max_incomplete_gap_days: int = 2) -> List[pd.Timestamp]:
+    """Pick weekly rebalance dates as the last trading day of each (W-FRI) week.
+
+    We prefer **complete weeks** for production signals. If the final week bucket ends on Friday
+    but our data stops earlier in the week (e.g. end is Tuesday), that bucket is considered
+    *incomplete* and will be dropped.
+
+    Heuristic for holidays: if the last available trading day is close to the bucket end
+    (<= max_incomplete_gap_days), we keep it (e.g. Fri is a holiday so Thu is the last trading day).
+    """
+    idx = pd.to_datetime(index)
+    if len(idx) == 0:
+        return []
+
+    # Ensure monotonic, unique timestamps
+    idx = pd.DatetimeIndex(idx).sort_values().unique()
+
+    # Group trading days into weeks that *end on Friday*.
+    s = pd.Series(idx, index=idx)
+    last = s.groupby(pd.Grouper(freq="W-FRI")).max().dropna()
+    if last.empty:
+        return []
+
+    # Drop the last bucket if it looks like a partial week (end mid-week), unless it's plausibly
+    # a holiday-shortened week.
+    bucket_end = pd.Timestamp(last.index[-1]).normalize()
+    last_day = pd.Timestamp(last.iloc[-1]).normalize()
+    gap_days = int((bucket_end - last_day).days)
+    if gap_days > int(max_incomplete_gap_days):
+        last = last.iloc[:-1]
+
+    return list(pd.to_datetime(last.values))
 
 
 def compute_weights_xsec_mom(
