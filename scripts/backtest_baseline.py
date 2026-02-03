@@ -304,7 +304,9 @@ def fetch_panel(
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        df["date"] = pd.to_datetime(df["date"])
+        # date can be mixed formats (YYYYMMDD from Tushare; YYYY-MM-DD legacy). Use mixed parser.
+        df["date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+        df = df.dropna(subset=["date"])
         df = df.drop_duplicates(subset=["date"]).set_index("date")
 
         if "close" in df.columns:
