@@ -238,7 +238,8 @@ def fetch_panel(
 def pick_weekly_rebalance_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
     iso = index.isocalendar()
     df = pd.DataFrame({"year": iso.year.values, "week": iso.week.values}, index=index)
-    last_dates = df.groupby(["year", "week"], sort=True).apply(lambda x: x.index.max(), include_groups=False)
+    # pandas<2.1 does not support include_groups kwarg in groupby.apply
+    last_dates = df.groupby(["year", "week"], sort=True).apply(lambda x: x.index.max())
     return list(pd.to_datetime(last_dates.values))
 
 
