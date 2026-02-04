@@ -26,6 +26,9 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import FileResponse, JSONResponse
 
+# Routers (thin wrappers)
+from api.signals import router as signals_router
+
 
 from api.core import REPORTS_DIR, RUNS_DIR, SIGNALS_DIR, read_json, redact_text
 from api.security import require_token, rate_limit_run, validate_cfg_envelope
@@ -33,6 +36,7 @@ from api.security import require_token, rate_limit_run, validate_cfg_envelope
 ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="QUANTAXIS API", version="0.1.0")
+app.include_router(signals_router)
 
 # --- Security / hardening knobs (env) ---
 API_MAX_CONCURRENT = int(os.getenv("QUANTAXIS_API_MAX_CONCURRENT", "2"))
@@ -1293,59 +1297,4 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             pass
 
 
-@app.post("/signals/run")
-def signals_run(cfg: Dict[str, Any], background: BackgroundTasks, request: Request):
-    require_token(request)
-    _rate_limit_run(request)
-    _validate_signal_cfg(cfg)
-
-    acquired = _job_sem.acquire(blocking=False)
-    if not acquired:
-        raise HTTPException(status_code=429, detail="too many concurrent runs")
-
-    signal_id = uuid.uuid4().hex
-    try:
-        background.add_task(run_signal, signal_id, cfg)
-    except Exception:
-        try:
-            _job_sem.release()
-        except Exception:
-            pass
-        raise
-
-    return {"signal_id": signal_id, "status": "queued"}
-
-
-# NOTE: declare ".csv" routes before the generic "/signals/{signal_id}" route,
-# otherwise "/signals/<id>.csv" may be captured by the generic handler.
-
-
-@app.get("/signals/{signal_id}.csv")
-def signals_csv(signal_id: str, request: Request):
-    require_token(request)
-    p = SIGNALS_DIR / f"{signal_id}.csv"
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="csv not found")
-    return FileResponse(str(p), media_type="text/csv")
-
-
-@app.get("/signals/{signal_id}_factors.csv")
-def signals_factors_csv(signal_id: str, request: Request):
-    require_token(request)
-    p = SIGNALS_DIR / f"{signal_id}_factors.csv"
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="factors csv not found")
-    return FileResponse(str(p), media_type="text/csv")
-
-
-@app.get("/signals/{signal_id}")
-def signals_get(signal_id: str, request: Request):
-    require_token(request)
-    p = SIGNALS_DIR / f"{signal_id}.json"
-    if not p.exists():
-        # maybe still running
-        st = SIGNALS_DIR / f"{signal_id}.status.json"
-        if st.exists():
-            return JSONResponse(read_json(st))
-        raise HTTPException(status_code=404, detail="signal not found")
-    return JSONResponse(read_json(p))
+# Signals routes are provided by api/signals.py router (see app.include_router).
