@@ -213,7 +213,11 @@ def build_weights_on_rebalance(
     liq_min_quantile: Optional[float],
     vol_max_quantile: Optional[float],
     min_bars: int,
-    score_weights: Dict[str, float],
+    score_weights_up: Dict[str, float],
+    score_weights_down: Optional[Dict[str, float]],
+    regime_switch: bool,
+    regime_mode: str,
+    regime_threshold: float,
     fac_windows: Dict[str, int],
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Return weights_on_rebalance (index=close.index, columns=close.columns)."""
@@ -253,7 +257,7 @@ def build_weights_on_rebalance(
     picks_by_reb: List[List[str]] = []
 
     # Counters
-    stats = {"rebalance_count": 0, "empty_candidates": 0}
+    stats = {"rebalance_count": 0, "empty_candidates": 0, "regime_up": 0, "regime_down": 0}
 
     for i, d in enumerate(reb_dates):
         if d not in close.index:
@@ -331,7 +335,23 @@ def build_weights_on_rebalance(
         zv20 = zv20.reindex(cand).fillna(0.0)
         zliq = zliq.reindex(cand).fillna(0.0)
 
-        w = score_weights
+        # Regime switch: pick score weights for this rebalance date
+        w = score_weights_up
+        if regime_switch and score_weights_down is not None:
+            if regime_mode == "breadth_ma":
+                # breadth = fraction of eligible universe above MA at date d
+                b = float(ma_long.loc[d, elig_codes].mean()) if len(elig_codes) else 0.0
+                is_up = b >= float(regime_threshold)
+            else:
+                is_up = True
+
+            if is_up:
+                stats["regime_up"] += 1
+                w = score_weights_up
+            else:
+                stats["regime_down"] += 1
+                w = score_weights_down
+
         score = (
             float(w.get("ret_20d", 0.0)) * zr20
             + float(w.get("ret_10d", 0.0)) * zr10
@@ -456,6 +476,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--w-vol-20d", type=float, default=-0.5)
     ap.add_argument("--w-liq-20d", type=float, default=0.2)
 
+    # Regime switch (optional): pick weights based on market state
+    ap.add_argument("--regime-switch", action="store_true", default=False, help="Enable simple regime switch on rebalance dates")
+    ap.add_argument("--regime-mode", choices=["breadth_ma"], default="breadth_ma")
+    ap.add_argument("--regime-threshold", type=float, default=0.5, help="For breadth_ma: fraction of universe above MA to consider regime=up")
+
+    # Down-regime weights (only used when --regime-switch is enabled)
+    ap.add_argument("--down-w-ret-20d", type=float, default=-1.0)
+    ap.add_argument("--down-w-ret-10d", type=float, default=-0.6)
+    ap.add_argument("--down-w-vol-20d", type=float, default=-0.3)
+    ap.add_argument("--down-w-liq-20d", type=float, default=0.0)
+
     ap.add_argument("--outdir", default="")
 
     args = ap.parse_args(argv)
@@ -487,12 +518,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     reb_dates = pick_weekly_rebalance_dates(close.index)
 
-    score_weights = {
+    score_weights_up = {
         "ret_20d": float(args.w_ret_20d),
         "ret_10d": float(args.w_ret_10d),
         "vol_20d": float(args.w_vol_20d),
         "liq_20d": float(args.w_liq_20d),
     }
+
+    score_weights_down = {
+        "ret_20d": float(args.down_w_ret_20d),
+        "ret_10d": float(args.down_w_ret_10d),
+        "vol_20d": float(args.down_w_vol_20d),
+        "liq_20d": float(args.down_w_liq_20d),
+    } if bool(args.regime_switch) else None
 
     fac_windows = {
         "ret_10d": int(args.fac_ret_10d),
@@ -517,7 +555,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         liq_min_quantile=(None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
         vol_max_quantile=(None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
         min_bars=int(args.min_bars),
-        score_weights=score_weights,
+        score_weights_up=score_weights_up,
+        score_weights_down=score_weights_down,
+        regime_switch=bool(args.regime_switch),
+        regime_mode=str(args.regime_mode),
+        regime_threshold=float(args.regime_threshold),
         fac_windows=fac_windows,
     )
 
@@ -546,7 +588,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "hold_weeks": int(args.hold_weeks),
         "tranche_overlap": bool(args.tranche_overlap),
         "cost_bps": float(args.cost_bps),
-        "score_weights": score_weights,
+        "score_weights_up": score_weights_up,
+        "score_weights_down": score_weights_down,
+        "regime_switch": bool(args.regime_switch),
+        "regime_mode": str(args.regime_mode),
+        "regime_threshold": float(args.regime_threshold),
         "factor_windows": fac_windows,
         "liq_field": volume_field,
         "generated_at": int(time.time()),
