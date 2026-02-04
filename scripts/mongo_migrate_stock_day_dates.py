@@ -69,22 +69,32 @@ def _parse_to_iso_date(v: Any) -> Optional[str]:
     return None
 
 
-def _connect(uri: str, db: str) -> pymongo.collection.Collection:
-    client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+def _connect(uri: str, db: str, user: str = "", password: str = "", authdb: str = "admin") -> pymongo.collection.Collection:
+    if user and password:
+        # Inject authSource if not present
+        if "authSource=" not in uri:
+            sep = "&" if "?" in uri else "?"
+            uri = f"{uri}{sep}authSource={authdb}"
+        client = pymongo.MongoClient(uri, username=user, password=password, serverSelectionTimeoutMS=8000)
+    else:
+        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
     client.admin.command("ping")
     return client[db]["stock_day"]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--uri", default="mongodb://localhost:27017", help="Mongo URI")
+    ap.add_argument("--uri", default="mongodb://localhost:27017", help="Mongo URI (unauthenticated)")
     ap.add_argument("--db", default="quantaxis", help="Database name")
+    ap.add_argument("--user", default="", help="Mongo username (optional)")
+    ap.add_argument("--password", default="", help="Mongo password (optional)")
+    ap.add_argument("--authdb", default="admin", help="Mongo authSource DB (default: admin)")
     ap.add_argument("--apply", action="store_true", help="Actually write changes")
     ap.add_argument("--batch", type=int, default=2000)
     ap.add_argument("--limit", type=int, default=0, help="Limit docs scanned (0=all)")
     args = ap.parse_args()
 
-    coll = _connect(args.uri, args.db)
+    coll = _connect(args.uri, args.db, user=args.user, password=args.password, authdb=args.authdb)
 
     q = {"date": {"$exists": True}}
     proj = {"_id": 1, "date": 1}
