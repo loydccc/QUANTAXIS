@@ -74,22 +74,33 @@ def ensure_indexes(coll: pymongo.collection.Collection) -> None:
 
 
 def tushare_pro():
+    """Create a Tushare pro client.
+
+    Supports a forwarder/proxy mode:
+    - If TUSHARE_HTTP_URL is set, we mimic the previously-used pattern:
+      pro = ts.pro_api('DUMMY'); then inject token+http_url to DataApi internals.
+    This is useful when the forwarder grants permissions that the raw token does not.
+    """
+
     import tushare as ts
 
     token = os.getenv("TUSHARE_TOKEN", "").strip()
     if not token:
         raise RuntimeError("missing TUSHARE_TOKEN")
 
-    pro = ts.pro_api(token)
-
-    # Optional proxy/forwarder support (same pattern as stock_day fetch)
     http_url = os.getenv("TUSHARE_HTTP_URL", "").strip()
+
     if http_url:
+        pro = ts.pro_api("DUMMY")
+        # Inject token + forwarder URL (best-effort, internal attributes)
         try:
+            pro._DataApi__token = token  # type: ignore[attr-defined]
             pro._DataApi__http_url = http_url  # type: ignore[attr-defined]
-        except Exception:
-            pass
-    return pro
+        except Exception as e:
+            raise RuntimeError(f"failed to init tushare forwarder mode: {e!r}")
+        return pro
+
+    return ts.pro_api(token)
 
 
 def fetch_daily_basic(pro, start_date: str, end_date: str) -> pd.DataFrame:
