@@ -298,9 +298,17 @@ def _ensure_date_column(df: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns={"level_0": "date"})
         return df
 
-    # If we have a DatetimeIndex, materialize it.
+    # If we have a (Multi)Index, materialize it.
     try:
         import pandas as pd
+
+        if isinstance(df.index, pd.MultiIndex):
+            out = df.reset_index()
+            if "date" not in out.columns:
+                # common case: first level becomes level_0
+                if "level_0" in out.columns:
+                    out = out.rename(columns={"level_0": "date"})
+            return out
 
         if isinstance(df.index, pd.DatetimeIndex):
             out = df.reset_index()
