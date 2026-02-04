@@ -285,9 +285,12 @@ def load_mv_panel(db: pymongo.database.Database, codes: List[str], start: str, e
 
 
 def _ensure_date_not_index(df: pd.DataFrame) -> pd.DataFrame:
-    # Avoid pandas ambiguity when a groupby-apply creates 'date' as an index level.
+    """Ensure 'date' is a normal column, not an index level."""
     if "date" in list(getattr(df.index, "names", [])):
-        return df.reset_index(drop=True)
+        # If 'date' also exists as a column, drop it to avoid duplicate/ambiguous labels.
+        if "date" in df.columns:
+            df = df.drop(columns=["date"])
+        df = df.reset_index()  # brings index level 'date' back as a column
     return df
 
 
