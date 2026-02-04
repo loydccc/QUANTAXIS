@@ -80,8 +80,8 @@ def fetch_panel_mixed_dates(
     start: str,
     end: str,
     volume_field: Optional[str],
-) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-    """Fetch close (and optional volume/amount) panels from Mongo.
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
+    """Fetch OHLC (and optional volume/amount) panels from Mongo.
 
     Supports mixed `date` formats:
     - YYYY-MM-DD
@@ -89,10 +89,13 @@ def fetch_panel_mixed_dates(
     - YYYYMMDD (int)
     """
 
+    open_series: Dict[str, pd.Series] = {}
+    high_series: Dict[str, pd.Series] = {}
+    low_series: Dict[str, pd.Series] = {}
     close_series: Dict[str, pd.Series] = {}
     vol_series: Dict[str, pd.Series] = {} if volume_field else {}
 
-    proj = {"_id": 0, "date": 1, "close": 1}
+    proj = {"_id": 0, "date": 1, "open": 1, "high": 1, "low": 1, "close": 1}
     if volume_field:
         proj[volume_field] = 1
 
@@ -119,6 +122,12 @@ def fetch_panel_mixed_dates(
         df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed", errors="coerce")
         df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).set_index("date").sort_index()
 
+        if "open" in df.columns:
+            open_series[code] = pd.to_numeric(df["open"], errors="coerce")
+        if "high" in df.columns:
+            high_series[code] = pd.to_numeric(df["high"], errors="coerce")
+        if "low" in df.columns:
+            low_series[code] = pd.to_numeric(df["low"], errors="coerce")
         if "close" in df.columns:
             close_series[code] = pd.to_numeric(df["close"], errors="coerce")
 
@@ -128,12 +137,22 @@ def fetch_panel_mixed_dates(
     if not close_series:
         raise RuntimeError("no data found for selected universe")
 
+    open_panel = pd.concat(open_series, axis=1).sort_index() if open_series else pd.DataFrame(index=pd.DatetimeIndex([]))
+    high_panel = pd.concat(high_series, axis=1).sort_index() if high_series else pd.DataFrame(index=pd.DatetimeIndex([]))
+    low_panel = pd.concat(low_series, axis=1).sort_index() if low_series else pd.DataFrame(index=pd.DatetimeIndex([]))
     close_panel = pd.concat(close_series, axis=1).sort_index()
+
+    # align indices
+    idx = close_panel.index
+    open_panel = open_panel.reindex(index=idx)
+    high_panel = high_panel.reindex(index=idx)
+    low_panel = low_panel.reindex(index=idx)
+
     vol_panel = None
     if volume_field and vol_series:
-        vol_panel = pd.concat(vol_series, axis=1).sort_index()
+        vol_panel = pd.concat(vol_series, axis=1).sort_index().reindex(index=idx)
 
-    return close_panel, vol_panel
+    return open_panel, high_panel, low_panel, close_panel, vol_panel
 
 
 def load_universe_from_mongo(db, theme: str) -> List[str]:
@@ -197,6 +216,9 @@ def load_universe_from_mongo(db, theme: str) -> List[str]:
 
 
 def build_weights_on_rebalance(
+    o: pd.DataFrame,
+    h: pd.DataFrame,
+    l: pd.DataFrame,
     close: pd.DataFrame,
     vol: Optional[pd.DataFrame],
     reb_dates: List[pd.Timestamp],
@@ -214,6 +236,7 @@ def build_weights_on_rebalance(
     vol_max_quantile: Optional[float],
     max_abs_ret_1d: Optional[float],
     limit_move_mode: str,
+    limit_touch_eps: float,
     min_bars: int,
     score_weights_up: Dict[str, float],
     score_weights_down: Optional[Dict[str, float]],
@@ -251,6 +274,10 @@ def build_weights_on_rebalance(
     ma_long = close > ma
 
     daily_ret = close.pct_change(fill_method=None)
+    # OHLC panels for execution feasibility
+    o = o.reindex(index=close.index)
+    h = h.reindex(index=close.index)
+    l = l.reindex(index=close.index)
 
     # Factor components (computed cross-sectionally at each rebalance date)
     ret10 = close / close.shift(int(fac_windows["ret_10d"])) - 1.0
@@ -446,10 +473,47 @@ def build_weights_on_rebalance(
 
         # Execution feasibility approximation: freeze trades for limit-move names on rebalance dates.
         # If a name is "blocked", we keep its previous weight and rescale the remaining tradable sleeve.
-        if limit_move_mode == "freeze" and max_abs_ret_1d is not None and gross > 0:
-            thr = float(max_abs_ret_1d)
+        if limit_move_mode == "freeze" and gross > 0:
+            # OHLC-based blocks on rebalance date d.
+            # If we want to BUY but close≈high => treat as limit-up / cannot buy.
+            # If we want to SELL but close≈low  => treat as limit-down / cannot sell.
+            eps = float(limit_touch_eps)
+            c_today = close.loc[d, cols]
+            hi_today = h.loc[d, cols]
+            lo_today = l.loc[d, cols]
+
+            # decide blocked set based on trade direction
+            blocked = set()
+            # threshold guard: if user passed max_abs_ret_1d, also require abs(ret1d) > thr to count as limit-touch
+            thr = float(max_abs_ret_1d) if max_abs_ret_1d is not None else None
             r1 = daily_ret.loc[d, cols].replace([np.inf, -np.inf], np.nan)
-            blocked = set([c for c in cols if pd.notna(r1.get(c)) and abs(float(r1.get(c))) > thr])
+
+            for c in cols:
+                prev_w = float(prev_wrow.get(c, 0.0))
+                tgt_w = float(wrow.get(c, 0.0))
+                if abs(tgt_w - prev_w) < 1e-15:
+                    continue
+
+                cc = c_today.get(c)
+                hh = hi_today.get(c)
+                ll = lo_today.get(c)
+                if pd.isna(cc) or pd.isna(hh) or pd.isna(ll):
+                    continue
+
+                # optional return threshold
+                if thr is not None:
+                    rr = r1.get(c)
+                    if pd.isna(rr) or abs(float(rr)) <= thr:
+                        continue
+
+                if tgt_w > prev_w:
+                    # buy attempt
+                    if abs(float(cc) - float(hh)) <= eps:
+                        blocked.add(c)
+                else:
+                    # sell attempt
+                    if abs(float(cc) - float(ll)) <= eps:
+                        blocked.add(c)
 
             if blocked:
                 blocked_w = prev_wrow.reindex(cols).fillna(0.0)
@@ -589,13 +653,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--max-abs-ret-1d",
         type=float,
         default=None,
-        help="Limit-move threshold on rebalance date (close-to-close 1d return). Used when --limit-move-mode != none.",
+        help="Limit-move threshold on rebalance date (close-to-close 1d return). Used when --limit-move-mode == filter.",
     )
     ap.add_argument(
         "--limit-move-mode",
         choices=["none", "filter", "freeze"],
         default="none",
-        help="How to handle limit-up/down proxy on rebalance dates: none|filter(candidates)|freeze(trades).",
+        help="How to handle limit-up/down on rebalance dates: none|filter(candidates by 1d ret)|freeze(trades by OHLC touch).",
+    )
+    ap.add_argument(
+        "--limit-touch-eps",
+        type=float,
+        default=1e-6,
+        help="Epsilon for OHLC comparisons when detecting limit-touch (close==high or close==low).",
     )
 
     # factor windows
@@ -647,15 +717,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     codes = load_universe_from_mongo(db, args.theme)
 
     volume_field = detect_volume_field(coll)
-    close_raw, vol_raw = fetch_panel_mixed_dates(coll, codes, start, end, volume_field=volume_field)
+    o_raw, h_raw, l_raw, close_raw, vol_raw = fetch_panel_mixed_dates(coll, codes, start, end, volume_field=volume_field)
     close_raw = close_raw.sort_index()
-    if vol_raw is not None:
-        vol_raw = vol_raw.sort_index().reindex(index=close_raw.index)
 
     # Keep only universe columns we actually have data for
     cols = [c for c in codes if c in close_raw.columns]
+    o = o_raw.reindex(index=close_raw.index)[cols]
+    h = h_raw.reindex(index=close_raw.index)[cols]
+    l = l_raw.reindex(index=close_raw.index)[cols]
     close = close_raw[cols]
-    vol = vol_raw[cols] if (vol_raw is not None) else None
+    vol = vol_raw.reindex(index=close_raw.index)[cols] if (vol_raw is not None) else None
 
     reb_dates = pick_weekly_rebalance_dates(close.index)
 
@@ -681,6 +752,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     }
 
     weights_on_reb, st = build_weights_on_rebalance(
+        o,
+        h,
+        l,
         close,
         vol,
         reb_dates,
@@ -697,6 +771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         vol_max_quantile=(None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
         max_abs_ret_1d=(None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         limit_move_mode=str(args.limit_move_mode),
+        limit_touch_eps=float(args.limit_touch_eps),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
         score_weights_down=score_weights_down,
@@ -752,6 +827,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "impact_floor": float(args.impact_floor),
         "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         "limit_move_mode": str(args.limit_move_mode),
+        "limit_touch_eps": float(args.limit_touch_eps),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
