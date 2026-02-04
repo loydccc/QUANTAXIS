@@ -27,24 +27,17 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import FileResponse, JSONResponse
 
 
-ROOT = Path(__file__).resolve().parents[1]
-REPORTS_DIR = ROOT / "output" / "reports"
-RUNS_DIR = ROOT / "output" / "api_runs"
-RUNS_DIR.mkdir(parents=True, exist_ok=True)
+from api.core import REPORTS_DIR, RUNS_DIR, SIGNALS_DIR, read_json, redact_text
+from api.security import require_token, rate_limit_run, validate_cfg_envelope
 
-SIGNALS_DIR = ROOT / "output" / "signals"
-SIGNALS_DIR.mkdir(parents=True, exist_ok=True)
+ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="QUANTAXIS API", version="0.1.0")
 
 # --- Security / hardening knobs (env) ---
-API_TOKEN = os.getenv("QUANTAXIS_API_TOKEN", "").strip()
 API_MAX_CONCURRENT = int(os.getenv("QUANTAXIS_API_MAX_CONCURRENT", "2"))
-API_RUNS_PER_MIN = int(os.getenv("QUANTAXIS_API_RUNS_PER_MIN", "6"))
 API_JOB_TIMEOUT_SEC = int(os.getenv("QUANTAXIS_API_JOB_TIMEOUT_SEC", "3600"))
 API_LOG_TAIL = int(os.getenv("QUANTAXIS_API_LOG_TAIL", "2000"))
-API_CFG_MAX_BYTES = int(os.getenv("QUANTAXIS_API_CFG_MAX_BYTES", "200000"))
-API_CFG_MAX_DEPTH = int(os.getenv("QUANTAXIS_API_CFG_MAX_DEPTH", "12"))
 API_INCLUDE_LOGS = os.getenv("QUANTAXIS_API_INCLUDE_LOGS", "").strip().lower() in {"1", "true", "yes"}
 
 # --- Factor score config (versioned in signal meta) ---
@@ -66,44 +59,8 @@ FAC_WEIGHTS = {
 HARD_VOL_20D_MAX = float(os.getenv("QUANTAXIS_HARD_VOL_20D_MAX", "0"))
 HARD_LIQ_20D_MIN = float(os.getenv("QUANTAXIS_HARD_LIQ_20D_MIN", "0"))
 
-# In-memory concurrency + rate limit (good enough for local/one-process MVP)
+# In-memory concurrency (good enough for local/one-process MVP)
 _job_sem = threading.BoundedSemaphore(max(1, API_MAX_CONCURRENT))
-_rl_lock = threading.Lock()
-_rl_hits: Dict[str, Deque[float]] = defaultdict(deque)
-
-
-def require_token(req: Request) -> None:
-    """Require X-API-Key when QUANTAXIS_API_TOKEN is set."""
-    if not API_TOKEN:
-        return
-    key = req.headers.get("x-api-key") or req.headers.get("X-API-Key")
-    if key != API_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-
-def _rate_limit_run(req: Request) -> None:
-    """Simple per-IP rate limit for /run (in-memory)."""
-    if API_RUNS_PER_MIN <= 0:
-        return
-    ip = (req.client.host if req.client else "unknown")
-    now = time.monotonic()
-    window = 60.0
-    with _rl_lock:
-        dq = _rl_hits[ip]
-        # drop old entries
-        while dq and now - dq[0] > window:
-            dq.popleft()
-        if len(dq) >= API_RUNS_PER_MIN:
-            raise HTTPException(status_code=429, detail="rate limit exceeded")
-        dq.append(now)
-
-
-def _walk_depth(x: Any, depth: int = 0) -> int:
-    if isinstance(x, dict) and x:
-        return max(_walk_depth(v, depth + 1) for v in x.values())
-    if isinstance(x, list) and x:
-        return max(_walk_depth(v, depth + 1) for v in x)
-    return depth
 
 
 _strategy_re = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -168,23 +125,7 @@ def _validate_cfg(cfg: Dict[str, Any]) -> None:
             raise HTTPException(status_code=400, detail=f"forbidden field: {forbidden}")
 
 
-def read_json(p: Path) -> Any:
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def _redact_text(s: str) -> str:
-    """Best-effort redaction for logs."""
-    if not s:
-        return s
-    out = s
-    if API_TOKEN:
-        out = out.replace(API_TOKEN, "<REDACTED>")
-    # common patterns
-    out = re.sub(r"(?i)(x-api-key\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
-    out = re.sub(r"(?i)(token\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
-    out = re.sub(r"(?i)(password\s*[:=]\s*)([^\s]+)", r"\1<REDACTED>", out)
-    return out
-
+# NOTE: moved to api/core.py (kept as import: read_json, redact_text)
 
 def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
     """Run a backtest job and persist status/result under output/api_runs/<job_id>.json"""
