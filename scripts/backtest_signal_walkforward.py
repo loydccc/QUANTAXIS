@@ -250,6 +250,7 @@ def build_weights_on_rebalance(
     cash_side: float,
     cash_down: float,
     side_band: float,
+    backup_k: int,
     fac_windows: Dict[str, int],
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Return weights_on_rebalance (index=close.index, columns=close.columns)."""
@@ -434,7 +435,9 @@ def build_weights_on_rebalance(
         def sk(code: str):
             return (-float(score.get(code, 0.0)), mom_rank.get(code, 10**9), code)
 
-        picks = sorted(cand, key=sk)[: int(top_k)]
+        ranked = sorted(cand, key=sk)
+        picks = ranked[: int(top_k)]
+        backups = ranked[int(top_k) : int(top_k) + max(0, int(backup_k))]
         picks_by_reb.append(picks)
         stats["rebalance_count"] += 1
 
@@ -522,23 +525,56 @@ def build_weights_on_rebalance(
                         blocked.add(c)
 
             if blocked:
-                blocked_w = prev_wrow.reindex(cols).fillna(0.0)
-                # keep previous for blocked codes, new target for others
-                w_new = wrow.copy()
-                for c in blocked:
-                    w_new.loc[c] = float(blocked_w.get(c, 0.0))
+                prev_w = prev_wrow.reindex(cols).fillna(0.0)
+                tgt_w = wrow.copy()
 
-                # rescale non-blocked weights to maintain total gross exposure
-                sum_blocked = float(w_new.loc[list(blocked)].sum())
-                target_nonblocked = max(0.0, gross - sum_blocked)
-                nonblocked = [c for c in cols if c not in blocked]
-                sum_nonblocked = float(w_new.loc[nonblocked].sum())
-                if sum_nonblocked > 0 and target_nonblocked >= 0:
-                    w_new.loc[nonblocked] = w_new.loc[nonblocked] * (target_nonblocked / sum_nonblocked)
+                blocked = sorted(list(blocked))
+                nonblocked = [c for c in cols if c not in set(blocked)]
+
+                # Split blocked into buy-blocked vs sell-blocked
+                buy_blocked = [c for c in blocked if float(tgt_w.get(c, 0.0)) > float(prev_w.get(c, 0.0))]
+                sell_blocked = [c for c in blocked if float(tgt_w.get(c, 0.0)) < float(prev_w.get(c, 0.0))]
+
+                # For blocked names, keep previous weights (can't trade in that direction)
+                w_new = tgt_w.copy()
+                for c in buy_blocked + sell_blocked:
+                    w_new.loc[c] = float(prev_w.get(c, 0.0))
+
+                # Compute how much gross exposure is left to allocate to tradable sleeve
+                sum_fixed = float(w_new.loc[blocked].sum()) if blocked else 0.0
+                target_tradable = max(0.0, gross - sum_fixed)
+
+                # Try to allocate tradable sleeve using ranked backups if buys were blocked
+                # Only allocate to names that are NOT blocked and are in our ranked list.
+                tradable_set = set(nonblocked)
+
+                # Current tradable allocations (from w_new)
+                sum_tradable = float(w_new.loc[nonblocked].sum()) if nonblocked else 0.0
+
+                # If buys were blocked, we may need to fill missing exposure with backups
+                if buy_blocked and target_tradable > 0:
+                    held = set([c for c in cols if float(w_new.get(c, 0.0)) > 0])
+                    # choose backup names not held and tradable
+                    add = []
+                    for c in backups:
+                        if c in tradable_set and c not in held:
+                            add.append(c)
+                        if len(add) >= len(buy_blocked):
+                            break
+                    if add:
+                        # give them equal provisional weights; will be rescaled below
+                        for c in add:
+                            w_new.loc[c] = w_new.get(c, 0.0) + 1.0
+
+                # Rescale tradable sleeve to target_tradable
+                sum_tradable2 = float(w_new.loc[nonblocked].sum()) if nonblocked else 0.0
+                if sum_tradable2 > 0:
+                    w_new.loc[nonblocked] = w_new.loc[nonblocked] * (target_tradable / sum_tradable2)
                 else:
-                    # if everything blocked or no nonblocked weight, just renormalize blocked to gross
-                    if sum_blocked > 0:
-                        w_new.loc[list(blocked)] = w_new.loc[list(blocked)] * (gross / sum_blocked)
+                    # If nothing tradable, renormalize fixed sleeve to gross
+                    if sum_fixed > 0:
+                        w_new.loc[blocked] = w_new.loc[blocked] * (gross / sum_fixed)
+
                 wrow = w_new
 
         weights.loc[d] = wrow
@@ -685,6 +721,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=1e-6,
         help="Epsilon for OHLC comparisons when detecting limit-touch (close==high or close==low).",
     )
+    ap.add_argument(
+        "--backup-k",
+        type=int,
+        default=150,
+        help="Backup candidate list size used when limit-move freeze blocks buys (top_k + backup_k ranked list).",
+    )
 
     # factor windows
     ap.add_argument("--fac-ret-10d", type=int, default=10)
@@ -803,6 +845,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cash_side=float(args.cash_side),
         cash_down=float(args.cash_down),
         side_band=float(args.side_band),
+        backup_k=int(args.backup_k),
         fac_windows=fac_windows,
     )
 
@@ -848,6 +891,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         "limit_move_mode": str(args.limit_move_mode),
         "limit_touch_eps": float(args.limit_touch_eps),
+        "backup_k": int(args.backup_k),
         "limit_pct": float(args.limit_pct),
         "limit_price_eps": float(args.limit_price_eps),
         "score_weights_up": score_weights_up,
