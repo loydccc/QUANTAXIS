@@ -237,6 +237,8 @@ def build_weights_on_rebalance(
     max_abs_ret_1d: Optional[float],
     limit_move_mode: str,
     limit_touch_eps: float,
+    limit_pct: float,
+    limit_price_eps: float,
     min_bars: int,
     score_weights_up: Dict[str, float],
     score_weights_down: Optional[Dict[str, float]],
@@ -474,19 +476,21 @@ def build_weights_on_rebalance(
         # Execution feasibility approximation: freeze trades for limit-move names on rebalance dates.
         # If a name is "blocked", we keep its previous weight and rescale the remaining tradable sleeve.
         if limit_move_mode == "freeze" and gross > 0:
-            # OHLC-based blocks on rebalance date d.
-            # If we want to BUY but close≈high => treat as limit-up / cannot buy.
-            # If we want to SELL but close≈low  => treat as limit-down / cannot sell.
-            eps = float(limit_touch_eps)
+            # More realistic A-share limit-touch detection.
+            # Approximate daily price limit by prev_close * (1±limit_pct).
+            # Freeze only in the trade direction:
+            # - buy attempt blocked if close is at/near up-limit
+            # - sell attempt blocked if close is at/near down-limit
+            eps_touch = float(limit_touch_eps)
+            eps_price = float(limit_price_eps)
+            lpct = float(limit_pct)
+
             c_today = close.loc[d, cols]
             hi_today = h.loc[d, cols]
             lo_today = l.loc[d, cols]
+            c_prev = close.shift(1).loc[d, cols]
 
-            # decide blocked set based on trade direction
             blocked = set()
-            # threshold guard: if user passed max_abs_ret_1d, also require abs(ret1d) > thr to count as limit-touch
-            thr = float(max_abs_ret_1d) if max_abs_ret_1d is not None else None
-            r1 = daily_ret.loc[d, cols].replace([np.inf, -np.inf], np.nan)
 
             for c in cols:
                 prev_w = float(prev_wrow.get(c, 0.0))
@@ -497,22 +501,24 @@ def build_weights_on_rebalance(
                 cc = c_today.get(c)
                 hh = hi_today.get(c)
                 ll = lo_today.get(c)
-                if pd.isna(cc) or pd.isna(hh) or pd.isna(ll):
+                pc = c_prev.get(c)
+                if pd.isna(cc) or pd.isna(hh) or pd.isna(ll) or pd.isna(pc):
                     continue
 
-                # optional return threshold
-                if thr is not None:
-                    rr = r1.get(c)
-                    if pd.isna(rr) or abs(float(rr)) <= thr:
-                        continue
+                # First require close to be at extreme (one-price style)
+                at_high = abs(float(cc) - float(hh)) <= eps_touch
+                at_low = abs(float(cc) - float(ll)) <= eps_touch
+
+                up_lim = float(pc) * (1.0 + lpct)
+                dn_lim = float(pc) * (1.0 - lpct)
 
                 if tgt_w > prev_w:
-                    # buy attempt
-                    if abs(float(cc) - float(hh)) <= eps:
+                    # buy attempt: block if at/near up-limit
+                    if at_high and abs(float(cc) - up_lim) <= eps_price:
                         blocked.add(c)
                 else:
-                    # sell attempt
-                    if abs(float(cc) - float(ll)) <= eps:
+                    # sell attempt: block if at/near down-limit
+                    if at_low and abs(float(cc) - dn_lim) <= eps_price:
                         blocked.add(c)
 
             if blocked:
@@ -653,7 +659,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--max-abs-ret-1d",
         type=float,
         default=None,
-        help="Limit-move threshold on rebalance date (close-to-close 1d return). Used when --limit-move-mode == filter.",
+        help="(Legacy) Limit-move threshold on rebalance date (close-to-close 1d return). Used when --limit-move-mode == filter.",
+    )
+    ap.add_argument(
+        "--limit-pct",
+        type=float,
+        default=0.10,
+        help="Price limit percentage used for limit-touch detection in freeze mode (default 10%).",
+    )
+    ap.add_argument(
+        "--limit-price-eps",
+        type=float,
+        default=1e-3,
+        help="Tolerance for comparing prices to limit price (in price units, not pct).",
     )
     ap.add_argument(
         "--limit-move-mode",
@@ -772,6 +790,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_abs_ret_1d=(None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         limit_move_mode=str(args.limit_move_mode),
         limit_touch_eps=float(args.limit_touch_eps),
+        limit_pct=float(args.limit_pct),
+        limit_price_eps=float(args.limit_price_eps),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
         score_weights_down=score_weights_down,
@@ -828,6 +848,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         "limit_move_mode": str(args.limit_move_mode),
         "limit_touch_eps": float(args.limit_touch_eps),
+        "limit_pct": float(args.limit_pct),
+        "limit_price_eps": float(args.limit_price_eps),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
