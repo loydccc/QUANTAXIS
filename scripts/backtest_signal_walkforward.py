@@ -212,6 +212,7 @@ def build_weights_on_rebalance(
     liq_min_ratio: float,
     liq_min_quantile: Optional[float],
     vol_max_quantile: Optional[float],
+    max_abs_ret_1d: Optional[float],
     min_bars: int,
     score_weights_up: Dict[str, float],
     score_weights_down: Optional[Dict[str, float]],
@@ -277,6 +278,13 @@ def build_weights_on_rebalance(
             elig = elig & vol_ok_roll.loc[d]
 
         elig_codes = [c for c in cols if bool(elig.get(c, False))]
+
+        # Limit-up/down proxy filter (uses close-to-close 1d return at rebalance date)
+        if max_abs_ret_1d is not None and elig_codes:
+            thr = float(max_abs_ret_1d)
+            r1 = daily_ret.loc[d, elig_codes].replace([np.inf, -np.inf], np.nan).dropna()
+            if not r1.empty:
+                elig_codes = [c for c in elig_codes if abs(float(r1.get(c, 0.0))) <= thr]
         if not elig_codes:
             picks_by_reb.append([])
             stats["empty_candidates"] += 1
@@ -435,7 +443,27 @@ def build_weights_on_rebalance(
     return weights, stats
 
 
-def backtest_close_to_close(close: pd.DataFrame, weights_on_rebalance: pd.DataFrame, cost_bps: float):
+def backtest_close_to_close(
+    close: pd.DataFrame,
+    weights_on_rebalance: pd.DataFrame,
+    cost_bps: float,
+    *,
+    liq20: Optional[pd.DataFrame] = None,
+    impact_k: float = 0.0,
+    impact_floor: float = 0.0,
+):
+    """Close-to-close backtest with T+1 execution.
+
+    Cost model:
+    - base linear cost: cost_bps * turnover
+    - optional impact: (impact_k / sqrt(liq_20d)) * turnover
+      where liq_20d is a rolling average of the chosen liquidity field.
+
+    Notes:
+    - This is still an approximation; it is meant to prevent the research loop
+      from selecting unrealistic high-impact portfolios.
+    """
+
     # forward-fill weights; then shift for T+1 execution
     w = weights_on_rebalance.reindex(close.index).ffill().fillna(0.0)
     w_eff = w.shift(1).fillna(0.0)
@@ -444,8 +472,23 @@ def backtest_close_to_close(close: pd.DataFrame, weights_on_rebalance: pd.DataFr
     gross = (w_eff * daily_ret).sum(axis=1)
 
     turnover = w_eff.diff().abs().sum(axis=1) / 2.0
-    cost = (float(cost_bps) / 10000.0) * turnover
-    net = gross - cost
+
+    base_cost = (float(cost_bps) / 10000.0) * turnover
+
+    imp_cost = 0.0
+    if impact_k and impact_k > 0 and liq20 is not None:
+        # portfolio liquidity proxy = sum_i w_i * liq_i
+        liq20a = liq20.reindex(close.index).ffill()
+        port_liq = (w_eff * liq20a).sum(axis=1)
+        floor = float(impact_floor) if impact_floor else 0.0
+        if floor > 0:
+            port_liq = port_liq.clip(lower=floor)
+        # if liquidity is missing, assume very high impact (small liq)
+        port_liq = port_liq.fillna(floor if floor > 0 else 1.0)
+        imp_bps = float(impact_k) / np.sqrt(port_liq)
+        imp_cost = (imp_bps / 10000.0) * turnover
+
+    net = gross - base_cost - imp_cost
 
     equity = (1.0 + net).cumprod()
     return equity, w_eff, turnover, net
@@ -496,6 +539,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--tranche-overlap", action="store_true", default=True)
 
     ap.add_argument("--cost-bps", type=float, default=10.0)
+    ap.add_argument(
+        "--impact-k",
+        type=float,
+        default=0.0,
+        help="Optional liquidity-based impact cost coefficient. Effective cost adds impact_k / sqrt(liq_20d).",
+    )
+    ap.add_argument(
+        "--impact-floor",
+        type=float,
+        default=0.0,
+        help="Floor for liq_20d in impact model to avoid blow-ups (same units as liq field).",
+    )
+    ap.add_argument(
+        "--max-abs-ret-1d",
+        type=float,
+        default=None,
+        help="Optional filter: drop candidates with |1d return| above this threshold on rebalance date (limit-up/down proxy).",
+    )
 
     # factor windows
     ap.add_argument("--fac-ret-10d", type=int, default=10)
@@ -594,6 +655,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         liq_min_ratio=float(args.liq_min_ratio),
         liq_min_quantile=(None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
         vol_max_quantile=(None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
+        max_abs_ret_1d=(None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
         score_weights_down=score_weights_down,
@@ -608,7 +670,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         fac_windows=fac_windows,
     )
 
-    equity, positions, turnover, net = backtest_close_to_close(close, weights_on_reb, cost_bps=float(args.cost_bps))
+    # rolling liquidity for impact model
+    liq20 = None
+    if vol is not None:
+        liq20 = vol.rolling(int(args.fac_liq_20d)).mean()
+
+    equity, positions, turnover, net = backtest_close_to_close(
+        close,
+        weights_on_reb,
+        cost_bps=float(args.cost_bps),
+        liq20=liq20,
+        impact_k=float(args.impact_k),
+        impact_floor=float(args.impact_floor),
+    )
     wk = weekly_returns_from_net(net)
 
     stats = perf_stats(equity, net, turnover)
@@ -633,6 +707,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "hold_weeks": int(args.hold_weeks),
         "tranche_overlap": bool(args.tranche_overlap),
         "cost_bps": float(args.cost_bps),
+        "impact_k": float(args.impact_k),
+        "impact_floor": float(args.impact_floor),
+        "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
