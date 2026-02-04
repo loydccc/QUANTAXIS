@@ -28,10 +28,9 @@ router = APIRouter(prefix="", tags=["signals"])
 def signals_run(cfg: dict, background: BackgroundTasks, request: Request):
     require_token(request)
     rate_limit_run(request)
-    # Lazy import to avoid circular imports at module import time.
-    from api.app import _validate_signal_cfg as _validate_signal_cfg_impl  # type: ignore
-    from api.app import run_signal as _run_signal_impl  # type: ignore
-    from api.app import _job_sem  # type: ignore
+    from api.signals_impl import validate_signal_cfg as _validate_signal_cfg_impl
+    from api.signals_impl import run_signal as _run_signal_impl
+    from api.state import job_sem as _job_sem
 
     _validate_signal_cfg_impl(cfg)
 

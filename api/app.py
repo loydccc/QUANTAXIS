@@ -38,6 +38,8 @@ app = FastAPI(title="QUANTAXIS API", version="0.1.0")
 API_MAX_CONCURRENT = int(os.getenv("QUANTAXIS_API_MAX_CONCURRENT", "2"))
 API_JOB_TIMEOUT_SEC = int(os.getenv("QUANTAXIS_API_JOB_TIMEOUT_SEC", "3600"))
 API_LOG_TAIL = int(os.getenv("QUANTAXIS_API_LOG_TAIL", "2000"))
+API_CFG_MAX_BYTES = int(os.getenv("QUANTAXIS_API_CFG_MAX_BYTES", "200000"))
+API_CFG_MAX_DEPTH = int(os.getenv("QUANTAXIS_API_CFG_MAX_DEPTH", "12"))
 API_INCLUDE_LOGS = os.getenv("QUANTAXIS_API_INCLUDE_LOGS", "").strip().lower() in {"1", "true", "yes"}
 
 # --- Factor score config (versioned in signal meta) ---
@@ -64,6 +66,9 @@ from api.state import job_sem as _job_sem
 
 
 _strategy_re = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+from api.util import walk_depth as _walk_depth
 
 
 def _validate_cfg(cfg: Dict[str, Any]) -> None:
@@ -368,92 +373,12 @@ def run_status(job_id: str, request: Request):
 
 
 # -------------------------
-# Signals API (Mode C MVP)
+# Signals implementation
 # -------------------------
+# Moved to api/signals_impl.py
+from api.signals_impl import run_signal, validate_signal_cfg as _validate_signal_cfg
 
-_baseline_strategy_re = re.compile(r"^(xsec_momentum_weekly_topk|ts_ma_weekly|hybrid_baseline_weekly_topk)$")
-_theme_re = re.compile(r"^[A-Za-z0-9_.-]{1,60}$")
-
-
-def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
-    if not isinstance(cfg, dict):
-        raise HTTPException(status_code=400, detail="config must be a JSON object")
-
-    # size/depth guards (signals cfg is not a backtest /run cfg; do NOT require data_version_id/manifest_sha256 here)
-    try:
-        raw = json.dumps(cfg, ensure_ascii=False)
-    except Exception:
-        raise HTTPException(status_code=400, detail="config must be JSON-serializable")
-    if API_CFG_MAX_BYTES > 0 and len(raw.encode("utf-8")) > API_CFG_MAX_BYTES:
-        raise HTTPException(status_code=400, detail="config too large")
-    if API_CFG_MAX_DEPTH > 0 and _walk_depth(cfg) > API_CFG_MAX_DEPTH:
-        raise HTTPException(status_code=400, detail="config too deeply nested")
-    if len(cfg) > 300:
-        raise HTTPException(status_code=400, detail="config has too many keys")
-    for forbidden in ("cmd", "command", "shell", "cwd", "workdir", "path"):
-        if forbidden in cfg:
-            raise HTTPException(status_code=400, detail=f"forbidden field: {forbidden}")
-
-    strategy = cfg.get("strategy")
-    theme = cfg.get("theme", "all")
-    top_k = cfg.get("top_k", 10)
-    rebalance = cfg.get("rebalance", "weekly")
-    hold_weeks = cfg.get("hold_weeks", 2)
-    tranche_overlap = cfg.get("tranche_overlap", True)
-    liq_window = cfg.get("liq_window", 20)
-    liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
-    ma_mode = cfg.get("ma_mode", "filter")
-    score_mode = cfg.get("score_mode", "baseline")
-
-    # Execution realism (optional)
-    execution_mode = str(cfg.get("execution_mode", "naive"))  # naive|realistic
-    backup_k = int(cfg.get("backup_k", 150))
-    limit_tiering = bool(cfg.get("limit_tiering", True))
-    limit_pct = float(cfg.get("limit_pct", 0.10))
-    limit_price_eps_bps = float(cfg.get("limit_price_eps_bps", 5.0))
-    limit_touch_mode = str(cfg.get("limit_touch_mode", "hl"))  # hl|close
-    limit_touch_eps = float(cfg.get("limit_touch_eps", 1e-6))
-
-    if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
-        raise HTTPException(status_code=400, detail="bad strategy")
-    if not isinstance(theme, str) or not _theme_re.match(theme):
-        raise HTTPException(status_code=400, detail="bad theme")
-    if rebalance != "weekly":
-        raise HTTPException(status_code=400, detail="only weekly rebalance supported in MVP")
-    if not isinstance(top_k, int) or top_k <= 0 or top_k > 200:
-        raise HTTPException(status_code=400, detail="bad top_k")
-    if not isinstance(hold_weeks, int) or hold_weeks < 1 or hold_weeks > 8:
-        raise HTTPException(status_code=400, detail="bad hold_weeks")
-    if not isinstance(tranche_overlap, bool):
-        raise HTTPException(status_code=400, detail="bad tranche_overlap")
-
-    if not isinstance(liq_window, int) or liq_window < 0 or liq_window > 252:
-        raise HTTPException(status_code=400, detail="bad liq_window")
-    try:
-        liq_min_ratio_f = float(liq_min_ratio)
-    except Exception:
-        raise HTTPException(status_code=400, detail="bad liq_min_ratio")
-    if liq_min_ratio_f <= 0 or liq_min_ratio_f > 1.0:
-        raise HTTPException(status_code=400, detail="bad liq_min_ratio")
-
-    if ma_mode not in {"filter", "boost"}:
-        raise HTTPException(status_code=400, detail="bad ma_mode (filter|boost)")
-
-    if score_mode not in {"baseline", "factor"}:
-        raise HTTPException(status_code=400, detail="bad score_mode (baseline|factor)")
-
-    if execution_mode not in {"naive", "realistic"}:
-        raise HTTPException(status_code=400, detail="bad execution_mode (naive|realistic)")
-    if not isinstance(backup_k, int) or backup_k < 0 or backup_k > 500:
-        raise HTTPException(status_code=400, detail="bad backup_k")
-    if not (0.0 < limit_pct < 0.5):
-        raise HTTPException(status_code=400, detail="bad limit_pct")
-    if not (0.0 <= limit_price_eps_bps <= 1000.0):
-        raise HTTPException(status_code=400, detail="bad limit_price_eps_bps")
-    if limit_touch_mode not in {"hl", "close"}:
-        raise HTTPException(status_code=400, detail="bad limit_touch_mode (hl|close)")
-    if not (0.0 <= limit_touch_eps <= 0.5):
-        raise HTTPException(status_code=400, detail="bad limit_touch_eps")
+# (NOTE) Files are still served by api/signals.py router.
 
 
 def _write_signal_csv(path: Path, positions: list[dict]) -> None:
