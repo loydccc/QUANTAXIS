@@ -553,6 +553,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     targets = [f"fwd_{h}d" for h in horizons]
 
     # standard pipeline: winsorize -> zscore -> optional industry neutral
+    # Guard against pandas ambiguity when 'date' becomes both index level and column
+    # (can happen after groupby-apply in some pandas versions).
+    if "date" in list(getattr(df.index, "names", [])):
+        df = df.reset_index(drop=True)
+
     fac_cols = raw_factors.copy()
     if float(args.winsor_pct) > 0:
         df = winsorize_by_date(df, fac_cols, pct=float(args.winsor_pct))
