@@ -240,6 +240,8 @@ def build_weights_on_rebalance(
     limit_pct: float,
     limit_tiering: bool,
     limit_price_eps: float,
+    limit_price_eps_bps: float,
+    limit_touch_mode: str,
     min_bars: int,
     score_weights_up: Dict[str, float],
     score_weights_down: Optional[Dict[str, float]],
@@ -486,7 +488,9 @@ def build_weights_on_rebalance(
             # - buy attempt blocked if close is at/near up-limit
             # - sell attempt blocked if close is at/near down-limit
             eps_touch = float(limit_touch_eps)
-            eps_price = float(limit_price_eps)
+            eps_price_abs = float(limit_price_eps)
+            eps_price_bps = float(limit_price_eps_bps)
+            touch_mode = str(limit_touch_mode)
             base_lpct = float(limit_pct)
 
             def _limit_pct_for(code: str) -> float:
@@ -518,21 +522,34 @@ def build_weights_on_rebalance(
                 if pd.isna(cc) or pd.isna(hh) or pd.isna(ll) or pd.isna(pc):
                     continue
 
-                # First require close to be at extreme (one-price style)
-                at_high = abs(float(cc) - float(hh)) <= eps_touch
-                at_low = abs(float(cc) - float(ll)) <= eps_touch
+                # One-price style (close at extreme)
+                at_high_close = abs(float(cc) - float(hh)) <= eps_touch
+                at_low_close = abs(float(cc) - float(ll)) <= eps_touch
 
                 lpct = _limit_pct_for(str(c))
                 up_lim = float(pc) * (1.0 + lpct)
                 dn_lim = float(pc) * (1.0 - lpct)
 
+                # relative tolerance
+                def near(a: float, b: float) -> bool:
+                    if b == 0:
+                        return abs(a - b) <= eps_price_abs
+                    return abs(a - b) <= max(eps_price_abs, abs(b) * (eps_price_bps / 10000.0))
+
+                if touch_mode == "hl":
+                    # If high touches up-limit, buys are hard; if low touches down-limit, sells are hard.
+                    touch_up = (float(hh) >= up_lim) and near(float(hh), up_lim)
+                    touch_dn = (float(ll) <= dn_lim) and near(float(ll), dn_lim)
+                else:
+                    # close mode
+                    touch_up = at_high_close and near(float(cc), up_lim)
+                    touch_dn = at_low_close and near(float(cc), dn_lim)
+
                 if tgt_w > prev_w:
-                    # buy attempt: block if at/near up-limit
-                    if at_high and abs(float(cc) - up_lim) <= eps_price:
+                    if touch_up:
                         blocked.add(c)
                 else:
-                    # sell attempt: block if at/near down-limit
-                    if at_low and abs(float(cc) - dn_lim) <= eps_price:
+                    if touch_dn:
                         blocked.add(c)
 
             if blocked:
@@ -724,7 +741,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--limit-price-eps",
         type=float,
         default=1e-3,
-        help="Tolerance for comparing prices to limit price (in price units, not pct).",
+        help="(Legacy) abs price tolerance for comparing prices to limit price.",
+    )
+    ap.add_argument(
+        "--limit-price-eps-bps",
+        type=float,
+        default=5.0,
+        help="Relative tolerance in bps for comparing to limit price (recommended).",
+    )
+    ap.add_argument(
+        "--limit-touch-mode",
+        choices=["close", "hl"],
+        default="hl",
+        help="Limit-touch detection mode: close (close near limit) or hl (high/low touches limit).",
     )
     ap.add_argument(
         "--limit-move-mode",
@@ -852,6 +881,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit_pct=float(args.limit_pct),
         limit_tiering=bool(args.limit_tiering),
         limit_price_eps=float(args.limit_price_eps),
+        limit_price_eps_bps=float(args.limit_price_eps_bps),
+        limit_touch_mode=str(args.limit_touch_mode),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
         score_weights_down=score_weights_down,
@@ -913,6 +944,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "limit_pct": float(args.limit_pct),
         "limit_tiering": bool(args.limit_tiering),
         "limit_price_eps": float(args.limit_price_eps),
+        "limit_price_eps_bps": float(args.limit_price_eps_bps),
+        "limit_touch_mode": str(args.limit_touch_mode),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
