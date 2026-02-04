@@ -636,9 +636,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     mv_available = (not mv_df.empty)
     if mv_available:
         df = df.merge(mv_df, on=["date", "code"], how="left")
+        df = _ensure_date_column(df)
 
     if int(args.mv_neutral) == 1 and mv_available:
         df = mv_neutralize_by_date(df, fac_cols, mv_col="float_mv")
+        df = _ensure_date_column(df)
 
     factors = fac_cols
 
