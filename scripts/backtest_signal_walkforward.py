@@ -218,6 +218,11 @@ def build_weights_on_rebalance(
     regime_switch: bool,
     regime_mode: str,
     regime_threshold: float,
+    regime_cash: bool,
+    cash_up: float,
+    cash_side: float,
+    cash_down: float,
+    side_band: float,
     fac_windows: Dict[str, int],
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Return weights_on_rebalance (index=close.index, columns=close.columns)."""
@@ -257,7 +262,7 @@ def build_weights_on_rebalance(
     picks_by_reb: List[List[str]] = []
 
     # Counters
-    stats = {"rebalance_count": 0, "empty_candidates": 0, "regime_up": 0, "regime_down": 0}
+    stats = {"rebalance_count": 0, "empty_candidates": 0, "regime_up": 0, "regime_down": 0, "regime_side": 0}
 
     for i, d in enumerate(reb_dates):
         if d not in close.index:
@@ -335,22 +340,44 @@ def build_weights_on_rebalance(
         zv20 = zv20.reindex(cand).fillna(0.0)
         zliq = zliq.reindex(cand).fillna(0.0)
 
-        # Regime switch: pick score weights for this rebalance date
+        # Regime switch: pick score weights (and optional cash weight) for this rebalance date
         w = score_weights_up
-        if regime_switch and score_weights_down is not None:
-            if regime_mode == "breadth_ma":
-                # breadth = fraction of eligible universe above MA at date d
-                b = float(ma_long.loc[d, elig_codes].mean()) if len(elig_codes) else 0.0
-                is_up = b >= float(regime_threshold)
-            else:
-                is_up = True
+        cash_w = 0.0
 
-            if is_up:
+        if regime_mode == "breadth_ma":
+            # breadth = fraction of eligible universe above MA at date d
+            b = float(ma_long.loc[d, elig_codes].mean()) if len(elig_codes) else 0.0
+            delta = b - 0.5
+            # 3-state regime: UP / SIDE / DOWN
+            if abs(delta) < float(side_band):
+                regime = "SIDE"
+            elif delta >= 0:
+                regime = "UP"
+            else:
+                regime = "DOWN"
+        else:
+            regime = "UP"
+
+        if regime_switch and score_weights_down is not None:
+            if regime == "UP":
                 stats["regime_up"] += 1
                 w = score_weights_up
-            else:
+            elif regime == "DOWN":
                 stats["regime_down"] += 1
                 w = score_weights_down
+            else:
+                stats["regime_side"] += 1
+                # In SIDE, keep the UP weights for now (we can add side-weights later)
+                w = score_weights_up
+
+        if regime_cash:
+            if regime == "UP":
+                cash_w = float(cash_up)
+            elif regime == "DOWN":
+                cash_w = float(cash_down)
+            else:
+                cash_w = float(cash_side)
+            cash_w = max(0.0, min(1.0, cash_w))
 
         score = (
             float(w.get("ret_20d", 0.0)) * zr20
@@ -384,7 +411,7 @@ def build_weights_on_rebalance(
         if not final:
             continue
 
-        # Build final weights at rebalance date
+        # Build final weights at rebalance date (stocks only), then apply gross exposure.
         wrow = pd.Series(0.0, index=cols)
         if tranche_n == 1:
             wgt = 1.0 / len(final)
@@ -397,6 +424,12 @@ def build_weights_on_rebalance(
             for c in set(curr_w) | set(prev_w):
                 wrow.loc[c] = 0.5 * curr_w.get(c, 0.0) + 0.5 * prev_w.get(c, 0.0)
 
+        gross = 1.0 - cash_w
+        if gross < 0:
+            gross = 0.0
+        if gross > 1:
+            gross = 1.0
+        wrow = wrow * gross
         weights.loc[d] = wrow
 
     return weights, stats
@@ -481,6 +514,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--regime-mode", choices=["breadth_ma"], default="breadth_ma")
     ap.add_argument("--regime-threshold", type=float, default=0.5, help="For breadth_ma: fraction of universe above MA to consider regime=up")
 
+    # Optional cash overlay driven by regime (0 cash return assumed)
+    ap.add_argument("--regime-cash", action="store_true", default=False, help="Enable cash allocation by regime")
+    ap.add_argument("--cash-up", type=float, default=0.0)
+    ap.add_argument("--cash-side", type=float, default=0.3)
+    ap.add_argument("--cash-down", type=float, default=0.7)
+    ap.add_argument("--side-band", type=float, default=0.1, help="For breadth_ma: SIDE regime when |breadth-0.5| < side_band")
+
     # Down-regime weights (only used when --regime-switch is enabled)
     ap.add_argument("--down-w-ret-20d", type=float, default=-1.0)
     ap.add_argument("--down-w-ret-10d", type=float, default=-0.6)
@@ -560,6 +600,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         regime_switch=bool(args.regime_switch),
         regime_mode=str(args.regime_mode),
         regime_threshold=float(args.regime_threshold),
+        regime_cash=bool(args.regime_cash),
+        cash_up=float(args.cash_up),
+        cash_side=float(args.cash_side),
+        cash_down=float(args.cash_down),
+        side_band=float(args.side_band),
         fac_windows=fac_windows,
     )
 
@@ -593,6 +638,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "regime_switch": bool(args.regime_switch),
         "regime_mode": str(args.regime_mode),
         "regime_threshold": float(args.regime_threshold),
+        "regime_cash": bool(args.regime_cash),
+        "cash_up": float(args.cash_up),
+        "cash_side": float(args.cash_side),
+        "cash_down": float(args.cash_down),
+        "side_band": float(args.side_band),
         "factor_windows": fac_windows,
         "liq_field": volume_field,
         "generated_at": int(time.time()),
