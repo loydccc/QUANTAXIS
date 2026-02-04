@@ -327,7 +327,10 @@ def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq
         if proxy_col not in sub.columns:
             return out
         p = sub[proxy_col]
-        p = np.log(pd.to_numeric(p, errors="coerce").fillna(0.0) + eps)
+        # liq should be >=0, but guard against dirty data
+        pv = pd.to_numeric(p, errors="coerce").fillna(0.0)
+        pv = pv.clip(lower=0.0)
+        p = np.log(pv + eps)
         for c in cols:
             x = sub[c]
             m = x.notna() & p.notna()
