@@ -213,6 +213,7 @@ def build_weights_on_rebalance(
     liq_min_quantile: Optional[float],
     vol_max_quantile: Optional[float],
     max_abs_ret_1d: Optional[float],
+    limit_move_mode: str,
     min_bars: int,
     score_weights_up: Dict[str, float],
     score_weights_down: Optional[Dict[str, float]],
@@ -262,6 +263,9 @@ def build_weights_on_rebalance(
     # Store picks for tranche overlap
     picks_by_reb: List[List[str]] = []
 
+    # Track previous rebalance weights (stocks only, already scaled by gross exposure)
+    prev_wrow = pd.Series(0.0, index=cols)
+
     # Counters
     stats = {"rebalance_count": 0, "empty_candidates": 0, "regime_up": 0, "regime_down": 0, "regime_side": 0}
 
@@ -279,8 +283,9 @@ def build_weights_on_rebalance(
 
         elig_codes = [c for c in cols if bool(elig.get(c, False))]
 
-        # Limit-up/down proxy filter (uses close-to-close 1d return at rebalance date)
-        if max_abs_ret_1d is not None and elig_codes:
+        # Limit-up/down proxy filter (optional): uses close-to-close 1d return at rebalance date.
+        # NOTE: this is only for candidate filtering. For execution realism prefer limit_move_mode="freeze".
+        if limit_move_mode == "filter" and max_abs_ret_1d is not None and elig_codes:
             thr = float(max_abs_ret_1d)
             r1 = daily_ret.loc[d, elig_codes].replace([np.inf, -np.inf], np.nan).dropna()
             if not r1.empty:
@@ -438,7 +443,36 @@ def build_weights_on_rebalance(
         if gross > 1:
             gross = 1.0
         wrow = wrow * gross
+
+        # Execution feasibility approximation: freeze trades for limit-move names on rebalance dates.
+        # If a name is "blocked", we keep its previous weight and rescale the remaining tradable sleeve.
+        if limit_move_mode == "freeze" and max_abs_ret_1d is not None and gross > 0:
+            thr = float(max_abs_ret_1d)
+            r1 = daily_ret.loc[d, cols].replace([np.inf, -np.inf], np.nan)
+            blocked = set([c for c in cols if pd.notna(r1.get(c)) and abs(float(r1.get(c))) > thr])
+
+            if blocked:
+                blocked_w = prev_wrow.reindex(cols).fillna(0.0)
+                # keep previous for blocked codes, new target for others
+                w_new = wrow.copy()
+                for c in blocked:
+                    w_new.loc[c] = float(blocked_w.get(c, 0.0))
+
+                # rescale non-blocked weights to maintain total gross exposure
+                sum_blocked = float(w_new.loc[list(blocked)].sum())
+                target_nonblocked = max(0.0, gross - sum_blocked)
+                nonblocked = [c for c in cols if c not in blocked]
+                sum_nonblocked = float(w_new.loc[nonblocked].sum())
+                if sum_nonblocked > 0 and target_nonblocked >= 0:
+                    w_new.loc[nonblocked] = w_new.loc[nonblocked] * (target_nonblocked / sum_nonblocked)
+                else:
+                    # if everything blocked or no nonblocked weight, just renormalize blocked to gross
+                    if sum_blocked > 0:
+                        w_new.loc[list(blocked)] = w_new.loc[list(blocked)] * (gross / sum_blocked)
+                wrow = w_new
+
         weights.loc[d] = wrow
+        prev_wrow = wrow.copy()
 
     return weights, stats
 
@@ -555,7 +589,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--max-abs-ret-1d",
         type=float,
         default=None,
-        help="Optional filter: drop candidates with |1d return| above this threshold on rebalance date (limit-up/down proxy).",
+        help="Limit-move threshold on rebalance date (close-to-close 1d return). Used when --limit-move-mode != none.",
+    )
+    ap.add_argument(
+        "--limit-move-mode",
+        choices=["none", "filter", "freeze"],
+        default="none",
+        help="How to handle limit-up/down proxy on rebalance dates: none|filter(candidates)|freeze(trades).",
     )
 
     # factor windows
@@ -656,6 +696,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         liq_min_quantile=(None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
         vol_max_quantile=(None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
         max_abs_ret_1d=(None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
+        limit_move_mode=str(args.limit_move_mode),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
         score_weights_down=score_weights_down,
@@ -710,6 +751,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "impact_k": float(args.impact_k),
         "impact_floor": float(args.impact_floor),
         "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
+        "limit_move_mode": str(args.limit_move_mode),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
