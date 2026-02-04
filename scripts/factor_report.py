@@ -496,8 +496,12 @@ def compute_rankic_series(df: pd.DataFrame, factors: List[str], targets: List[st
             for tgt in targets:
                 row[f"ic_{fac}__{tgt}"] = _rankic_for_date(sub, fac, tgt)
         out_rows.append(row)
-    out = pd.DataFrame(out_rows).set_index("date").sort_index()
-    return out
+    if not out_rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(out_rows)
+    if "date" not in out.columns:
+        return pd.DataFrame()
+    return out.set_index("date").sort_index()
 
 
 def decile_spread(df: pd.DataFrame, fac: str, tgt: str, q: int = 10) -> pd.Series:
@@ -625,6 +629,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # keep rows where at least one factor + one target exists
     df = df.dropna(subset=["close"])  # already
+
+    df = _ensure_date_column(df)
+    if "date" not in df.columns or df.empty:
+        raise RuntimeError("factor_report: empty dataframe or missing date column after preprocessing")
 
     ic_df = compute_rankic_series(df, factors, targets)
 
