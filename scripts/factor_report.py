@@ -284,13 +284,41 @@ def load_mv_panel(db: pymongo.database.Database, codes: List[str], start: str, e
     return df
 
 
+def _ensure_date_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a usable 'date' column exists (robust to groupby-apply quirks)."""
+    if "date" in df.columns:
+        return df
+
+    idx_names = list(getattr(df.index, "names", []))
+    if "date" in idx_names:
+        return df.reset_index()
+
+    # Sometimes pandas uses 'level_0' after reset_index/name conflicts.
+    if "level_0" in df.columns and "date" not in df.columns:
+        df = df.rename(columns={"level_0": "date"})
+        return df
+
+    # If we have a DatetimeIndex, materialize it.
+    try:
+        import pandas as pd
+
+        if isinstance(df.index, pd.DatetimeIndex):
+            out = df.reset_index()
+            if "index" in out.columns and "date" not in out.columns:
+                out = out.rename(columns={"index": "date"})
+            return out
+    except Exception:
+        pass
+
+    return df
+
+
 def _ensure_date_not_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure 'date' is a normal column, not an index level."""
+    # Kept for backward compatibility; normalize to a proper date column.
+    df = _ensure_date_column(df)
+    # If 'date' is both index and column, drop the index.
     if "date" in list(getattr(df.index, "names", [])):
-        # If 'date' also exists as a column, drop it to avoid duplicate/ambiguous labels.
-        if "date" in df.columns:
-            df = df.drop(columns=["date"])
-        df = df.reset_index()  # brings index level 'date' back as a column
+        df = df.reset_index(drop=True)
     return df
 
 
@@ -314,7 +342,8 @@ def winsorize_by_date(df: pd.DataFrame, cols: List[str], pct: float) -> pd.DataF
         return out
 
     out = df.groupby("date", sort=True, group_keys=False).apply(_w)
-    return _ensure_date_not_index(out)
+    out = _ensure_date_column(out)
+    return out.reset_index(drop=True)
 
 
 def zscore_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
@@ -333,7 +362,8 @@ def zscore_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
         return out
 
     out = df.groupby("date", sort=True, group_keys=False).apply(_z)
-    return _ensure_date_not_index(out)
+    out = _ensure_date_column(out)
+    return out.reset_index(drop=True)
 
 
 def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
@@ -349,7 +379,8 @@ def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
         return out
 
     out = df.groupby("date", sort=True, group_keys=False).apply(_one_day)
-    return _ensure_date_not_index(out)
+    out = _ensure_date_column(out)
+    return out.reset_index(drop=True)
 
 
 def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq_20d") -> Dict[str, float]:
@@ -442,7 +473,8 @@ def mv_neutralize_by_date(df: pd.DataFrame, cols: List[str], mv_col: str = "floa
         return out
 
     out = df.groupby("date", sort=True, group_keys=False).apply(_one_day)
-    return _ensure_date_not_index(out)
+    out = _ensure_date_column(out)
+    return out.reset_index(drop=True)
 
 
 def _rankic_for_date(sub: pd.DataFrame, fac: str, target: str) -> float:
