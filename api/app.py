@@ -952,9 +952,13 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             for t in range(n_tr):
                 mom_w = mom_tr[t]["weights"] if t < len(mom_tr) else {}
                 ma_w = ma_tr[t]["weights"] if t < len(ma_tr) else {}
-                # momentum picks: take top_k by weight (they are equal, but keep stable)
+                # momentum candidates by weight (weights are equal, but keep stable order).
+                # IMPORTANT: when we do factor scoring, we need a *larger candidate pool* than top_k,
+                # otherwise flipping factor weights only re-orders picks but rarely changes membership.
                 mom_sorted = sorted(mom_w.items(), key=lambda x: (-x[1], x[0]))
-                mom_top = [c for c, _w in mom_sorted][:top_k]
+                cand_k = int(cfg.get("candidate_k", (top_k * 5 if score_mode == "factor" else top_k)))
+                cand_k = max(top_k, min(500, cand_k))
+                mom_top = [c for c, _w in mom_sorted][:cand_k]
                 ma_set = set([c for c, w in ma_w.items() if w > 0])
 
                 scores: Dict[str, float] = {}
