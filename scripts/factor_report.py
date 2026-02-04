@@ -246,6 +246,74 @@ def add_forward_returns(df: pd.DataFrame, horizons: List[int]) -> pd.DataFrame:
     return df
 
 
+def load_industry_map(db: pymongo.database.Database) -> Dict[str, str]:
+    """Load code->industry mapping from stock_list.
+
+    Returns empty dict if not available.
+    """
+    if "stock_list" not in db.list_collection_names():
+        return {}
+    out: Dict[str, str] = {}
+    for doc in db["stock_list"].find({}, {"_id": 0, "code": 1, "industry": 1}):
+        c = doc.get("code")
+        ind = doc.get("industry")
+        if not c or not ind:
+            continue
+        out[str(c).zfill(6)] = str(ind)
+    return out
+
+
+def winsorize_by_date(df: pd.DataFrame, cols: List[str], pct: float) -> pd.DataFrame:
+    if pct <= 0:
+        return df
+    pct = float(pct)
+    lo = pct
+    hi = 1.0 - pct
+
+    def _w(sub: pd.DataFrame) -> pd.DataFrame:
+        out = sub.copy()
+        for c in cols:
+            x = out[c]
+            if x.notna().sum() < 30:
+                continue
+            ql = float(x.quantile(lo))
+            qh = float(x.quantile(hi))
+            out[c] = x.clip(ql, qh)
+        return out
+
+    return df.groupby("date", sort=True, group_keys=False).apply(_w)
+
+
+def zscore_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    def _z(sub: pd.DataFrame) -> pd.DataFrame:
+        out = sub.copy()
+        for c in cols:
+            x = out[c]
+            m = float(x.mean())
+            s = float(x.std(ddof=1))
+            if not np.isfinite(s) or s < 1e-12:
+                out[c] = np.nan
+            else:
+                out[c] = (x - m) / s
+        return out
+
+    return df.groupby("date", sort=True, group_keys=False).apply(_z)
+
+
+def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    """Demean factors by industry per date (simple industry neutralization)."""
+
+    def _one_day(sub: pd.DataFrame) -> pd.DataFrame:
+        out = sub.copy()
+        if "industry" not in out.columns:
+            return out
+        for c in cols:
+            out[c] = out[c] - out.groupby("industry")[c].transform("mean")
+        return out
+
+    return df.groupby("date", sort=True, group_keys=False).apply(_one_day)
+
+
 def _rankic_for_date(sub: pd.DataFrame, fac: str, target: str) -> float:
     x = sub[fac]
     y = sub[target]
@@ -283,7 +351,8 @@ def decile_spread(df: pd.DataFrame, fac: str, tgt: str, q: int = 10) -> pd.Serie
         bot = sub2[sub2["bin"] == sub2["bin"].min()][tgt].mean()
         return float(top - bot)
 
-    return df.groupby("date", sort=True).apply(_one)
+    # groupby-apply warning: ensure we only pass required columns
+    return df[["date", fac, tgt]].groupby("date", sort=True).apply(_one)
 
 
 def summarize_ic(ic: pd.Series) -> Dict[str, float]:
@@ -305,6 +374,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--liq-window", type=int, default=20)
     ap.add_argument("--liq-min-ratio", type=float, default=1.0)
     ap.add_argument("--max-codes", type=int, default=0, help="0 = all")
+    ap.add_argument("--winsor-pct", type=float, default=0.01, help="Cross-sectional winsorize percent per tail (0=disable)")
+    ap.add_argument("--zscore", type=int, default=1, help="1=apply cross-sectional z-score per date")
+    ap.add_argument("--industry-neutral", type=int, default=0, help="1=industry demean per date (requires stock_list.industry)")
     ap.add_argument("--outdir", default=None)
     args = ap.parse_args(argv)
 
@@ -331,6 +403,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     eligible = bars[bars >= int(args.min_bars)].index
     df = df[df["code"].isin(eligible)].copy()
 
+    # optional industry mapping (for neutralization/exposure checks)
+    ind_map = load_industry_map(db)
+    if ind_map:
+        df["industry"] = df["code"].map(ind_map).fillna("")
+    else:
+        df["industry"] = ""
+
     # liquidity recent window filter (optional)
     win = int(args.liq_window)
     ratio = max(0.0, min(1.0, float(args.liq_min_ratio)))
@@ -352,8 +431,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     df = add_factors(df)
     df = add_forward_returns(df, horizons)
 
-    factors = ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]
+    raw_factors = ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]
     targets = [f"fwd_{h}d" for h in horizons]
+
+    # standard pipeline: winsorize -> zscore -> optional industry neutral
+    fac_cols = raw_factors.copy()
+    if float(args.winsor_pct) > 0:
+        df = winsorize_by_date(df, fac_cols, pct=float(args.winsor_pct))
+    if int(args.zscore) == 1:
+        df = zscore_by_date(df, fac_cols)
+    if int(args.industry_neutral) == 1 and (df.get("industry") is not None) and (df["industry"].astype(str) != "").any():
+        df = industry_demean_by_date(df, fac_cols)
+
+    factors = fac_cols
 
     # keep rows where at least one factor + one target exists
     df = df.dropna(subset=["close"])  # already
@@ -374,6 +464,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "universe_size_eligible": int(df["code"].nunique()),
         "liq_field_detected": liq_field,
         "date_format": "YYYY-MM-DD",
+        "preprocess": {
+            "winsor_pct": float(args.winsor_pct),
+            "zscore": bool(int(args.zscore) == 1),
+            "industry_neutral": bool(int(args.industry_neutral) == 1),
+            "industry_source": "stock_list.industry" if bool(ind_map) else None,
+        },
         "metrics": {},
     }
 
@@ -409,13 +505,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # factor correlations (average cross-sectional corr per date)
     corr_rows = []
+    n_rows = []
     for d, sub in df.groupby("date"):
-        sub2 = sub[["ret_10d", "ret_20d", "vol_20d", "liq_20d"]].copy()
-        if sub2.dropna().shape[0] < 200:
+        sub2 = sub[factors].copy()
+        n = int(sub2.dropna().shape[0])
+        n_rows.append({"date": d, "n": n})
+        if n < 200:
             continue
         corr = sub2.corr(method="spearman")
         corr["date"] = d
         corr_rows.append(corr)
+    summary["factor_corr_inputs"] = {
+        "factors": factors,
+        "min_n_for_corr": 200,
+        "n_by_date": {str(r["date"].date()): int(r["n"]) for r in n_rows[:2000]},
+    }
     if corr_rows:
         # average matrix
         mats = [c.drop(columns=["date"]) if "date" in c.columns else c for c in corr_rows]
