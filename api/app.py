@@ -933,6 +933,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
+    # Execution realism (optional; validated in _validate_signal_cfg)
+    execution_mode = str(cfg.get("execution_mode", "naive"))
+    backup_k = int(cfg.get("backup_k", 150))
+    limit_tiering = bool(cfg.get("limit_tiering", True))
+    limit_pct = float(cfg.get("limit_pct", 0.10))
+    limit_price_eps_bps = float(cfg.get("limit_price_eps_bps", 5.0))
+    limit_touch_mode = str(cfg.get("limit_touch_mode", "hl"))
+    limit_touch_eps = float(cfg.get("limit_touch_eps", 1e-6))
+
     # cfg used for the successful run (may be auto-relaxed)
     cfg_used: Dict[str, Any] = dict(cfg)
 
