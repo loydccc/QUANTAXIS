@@ -241,6 +241,9 @@ def index():
 
 @app.get("/health")
 def health():
+    # auth_required is derived from api.security.API_TOKEN
+    from api.security import API_TOKEN, API_RUNS_PER_MIN
+
     return {
         "ok": True,
         "ts": int(time.time()),
