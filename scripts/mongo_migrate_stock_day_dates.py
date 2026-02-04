@@ -90,6 +90,7 @@ def main() -> None:
     ap.add_argument("--password", default="", help="Mongo password (optional)")
     ap.add_argument("--authdb", default="admin", help="Mongo authSource DB (default: admin)")
     ap.add_argument("--apply", action="store_true", help="Actually write changes")
+    ap.add_argument("--on-dup", default="skip", choices=["skip", "delete_source"], help="What to do if normalizing date causes duplicate key on (code,date). skip=leave as-is; delete_source=delete the doc being updated")
     ap.add_argument("--batch", type=int, default=2000)
     ap.add_argument("--limit", type=int, default=0, help="Limit docs scanned (0=all)")
     args = ap.parse_args()
@@ -106,6 +107,8 @@ def main() -> None:
     scanned = 0
     changed = 0
     skipped = 0
+    dup_conflicts = 0
+    dup_deleted = 0
 
     ops = []
 
@@ -127,12 +130,40 @@ def main() -> None:
 
             if len(ops) >= args.batch:
                 if args.apply:
-                    coll.bulk_write(ops, ordered=False)
+                    try:
+                        coll.bulk_write(ops, ordered=False)
+                    except pymongo.errors.BulkWriteError as e:
+                        # Most common case: normalizing YYYYMMDD -> YYYY-MM-DD may collide with an existing doc
+                        # under unique index (code, date).
+                        errs = e.details.get("writeErrors", []) if hasattr(e, "details") and e.details else []
+                        dup_conflicts += len(errs)
+                        if args.on_dup == "delete_source":
+                            for we in errs:
+                                op = we.get("op") or {}
+                                q = op.get("q") or {}
+                                _id = q.get("_id")
+                                if _id is not None:
+                                    coll.delete_one({"_id": _id})
+                                    dup_deleted += 1
+                        # else: skip the conflicting updates (leave old date as-is)
                 ops = []
 
         if ops:
             if args.apply:
-                coll.bulk_write(ops, ordered=False)
+                try:
+                    coll.bulk_write(ops, ordered=False)
+                except pymongo.errors.BulkWriteError as e:
+                    errs = e.details.get("writeErrors", []) if hasattr(e, "details") and e.details else []
+                    dup_conflicts += len(errs)
+                    if args.on_dup == "delete_source":
+                        for we in errs:
+                            op = we.get("op") or {}
+                            q = op.get("q") or {}
+                            _id = q.get("_id")
+                            if _id is not None:
+                                coll.delete_one({"_id": _id})
+                                dup_deleted += 1
+                    # skip otherwise
 
     finally:
         try:
@@ -141,9 +172,13 @@ def main() -> None:
             pass
 
     mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"[{mode}] scanned={scanned} changed={changed} skipped_unparseable={skipped}")
+    extra = f" dup_conflicts={dup_conflicts} dup_deleted={dup_deleted}" if args.apply else ""
+    print(f"[{mode}] scanned={scanned} changed={changed} skipped_unparseable={skipped}{extra}")
     if not args.apply:
         print("Pass --apply to write changes.")
+    else:
+        if dup_conflicts and args.on_dup == "skip":
+            print("NOTE: duplicate-key conflicts were skipped; re-run with --on-dup delete_source to delete the conflicting docs being updated.")
 
 
 if __name__ == "__main__":
