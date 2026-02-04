@@ -13,10 +13,6 @@ from __future__ import annotations
 from fastapi import APIRouter, BackgroundTasks, Request
 
 from api.security import require_token, rate_limit_run
-
-# We keep the implementation in api.app for now (thin router layer).
-from api.app import run_signal as _run_signal_impl  # noqa
-from api.app import _validate_signal_cfg as _validate_signal_cfg_impl  # noqa
 from api.core import SIGNALS_DIR
 
 import json
@@ -32,10 +28,13 @@ router = APIRouter(prefix="", tags=["signals"])
 def signals_run(cfg: dict, background: BackgroundTasks, request: Request):
     require_token(request)
     rate_limit_run(request)
+    # Lazy import to avoid circular imports at module import time.
+    from api.app import _validate_signal_cfg as _validate_signal_cfg_impl  # type: ignore
+    from api.app import run_signal as _run_signal_impl  # type: ignore
+    from api.app import _job_sem  # type: ignore
+
     _validate_signal_cfg_impl(cfg)
 
-    # Concurrency semaphore is owned by api.app (single-process MVP)
-    from api.app import _job_sem  # type: ignore
     import uuid
 
     acquired = _job_sem.acquire(blocking=False)

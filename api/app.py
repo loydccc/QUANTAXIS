@@ -26,9 +26,6 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import FileResponse, JSONResponse
 
-# Routers (thin wrappers)
-from api.signals import router as signals_router
-
 
 from api.core import REPORTS_DIR, RUNS_DIR, SIGNALS_DIR, read_json, redact_text
 from api.security import require_token, rate_limit_run, validate_cfg_envelope
@@ -36,7 +33,6 @@ from api.security import require_token, rate_limit_run, validate_cfg_envelope
 ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="QUANTAXIS API", version="0.1.0")
-app.include_router(signals_router)
 
 # --- Security / hardening knobs (env) ---
 API_MAX_CONCURRENT = int(os.getenv("QUANTAXIS_API_MAX_CONCURRENT", "2"))
@@ -64,7 +60,7 @@ HARD_VOL_20D_MAX = float(os.getenv("QUANTAXIS_HARD_VOL_20D_MAX", "0"))
 HARD_LIQ_20D_MIN = float(os.getenv("QUANTAXIS_HARD_LIQ_20D_MIN", "0"))
 
 # In-memory concurrency (good enough for local/one-process MVP)
-_job_sem = threading.BoundedSemaphore(max(1, API_MAX_CONCURRENT))
+from api.state import job_sem as _job_sem
 
 
 _strategy_re = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -1297,4 +1293,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             pass
 
 
-# Signals routes are provided by api/signals.py router (see app.include_router).
+# --- Router wiring (imported last to avoid circular imports) ---
+from api.signals import router as signals_router
+
+app.include_router(signals_router)
