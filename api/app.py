@@ -461,6 +461,15 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     ma_mode = cfg.get("ma_mode", "filter")
     score_mode = cfg.get("score_mode", "baseline")
 
+    # Execution realism (optional)
+    execution_mode = str(cfg.get("execution_mode", "naive"))  # naive|realistic
+    backup_k = int(cfg.get("backup_k", 150))
+    limit_tiering = bool(cfg.get("limit_tiering", True))
+    limit_pct = float(cfg.get("limit_pct", 0.10))
+    limit_price_eps_bps = float(cfg.get("limit_price_eps_bps", 5.0))
+    limit_touch_mode = str(cfg.get("limit_touch_mode", "hl"))  # hl|close
+    limit_touch_eps = float(cfg.get("limit_touch_eps", 1e-6))
+
     if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
         raise HTTPException(status_code=400, detail="bad strategy")
     if not isinstance(theme, str) or not _theme_re.match(theme):
@@ -488,6 +497,19 @@ def _validate_signal_cfg(cfg: Dict[str, Any]) -> None:
 
     if score_mode not in {"baseline", "factor"}:
         raise HTTPException(status_code=400, detail="bad score_mode (baseline|factor)")
+
+    if execution_mode not in {"naive", "realistic"}:
+        raise HTTPException(status_code=400, detail="bad execution_mode (naive|realistic)")
+    if not isinstance(backup_k, int) or backup_k < 0 or backup_k > 500:
+        raise HTTPException(status_code=400, detail="bad backup_k")
+    if not (0.0 < limit_pct < 0.5):
+        raise HTTPException(status_code=400, detail="bad limit_pct")
+    if not (0.0 <= limit_price_eps_bps <= 1000.0):
+        raise HTTPException(status_code=400, detail="bad limit_price_eps_bps")
+    if limit_touch_mode not in {"hl", "close"}:
+        raise HTTPException(status_code=400, detail="bad limit_touch_mode (hl|close)")
+    if not (0.0 <= limit_touch_eps <= 0.5):
+        raise HTTPException(status_code=400, detail="bad limit_touch_eps")
 
 
 def _write_signal_csv(path: Path, positions: list[dict]) -> None:
@@ -1023,7 +1045,113 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 def sort_key(code: str):
                     return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
 
-                picks = sorted(candidates, key=sort_key)[:top_k]
+                ranked = sorted(candidates, key=sort_key)
+                picks = ranked[:top_k]
+                backups = ranked[top_k : top_k + max(0, backup_k)]
+
+                # Execution realism: if enabled, apply limit-touch freeze on BUY side and fill with backups.
+                if execution_mode == "realistic" and backups:
+                    # Determine which picks are new buys vs previous tranche holdings (mom/ma overlap makes it fuzzy,
+                    # but we treat prev tranche holdings as "already held" for buy-block purposes).
+                    prev_set = set()
+                    if t - 1 >= 0 and t - 1 < len(tranche_objs):
+                        prev_set = set(tranche_objs[t - 1].get("picks") or [])
+
+                    # Compute limit-touch on rebalance date using Mongo OHLC.
+                    # We reuse factor computation helper to connect to Mongo.
+                    try:
+                        import pandas as pd
+                        asof = pd.to_datetime(mom_tr[t]["rebalance_date"]) if t < len(mom_tr) else pd.to_datetime(mom_date)
+                    except Exception:
+                        asof = None
+
+                    blocked_buys = set()
+                    if asof is not None:
+                        # connect mongo (same env as factor compute)
+                        import pymongo
+                        host = os.getenv("MONGODB_HOST", os.getenv("MONGO_HOST", "mongodb"))
+                        port = int(os.getenv("MONGODB_PORT", os.getenv("MONGO_PORT", "27017")))
+                        dbn = os.getenv("MONGODB_DATABASE", os.getenv("MONGO_DATABASE", "quantaxis"))
+                        user = os.getenv("MONGODB_USER", os.getenv("MONGO_USER", "quantaxis"))
+                        password = os.getenv("MONGODB_PASSWORD", os.getenv("MONGO_PASSWORD", "quantaxis"))
+                        root_user = os.getenv("MONGO_ROOT_USER", "root")
+                        root_password = os.getenv("MONGO_ROOT_PASSWORD", "root")
+                        uris = [
+                            f"mongodb://{user}:{password}@{host}:{port}/{dbn}?authSource=admin",
+                            f"mongodb://{root_user}:{root_password}@{host}:{port}/{dbn}?authSource=admin",
+                            f"mongodb://{host}:{port}/{dbn}",
+                        ]
+                        client = None
+                        for uri in uris:
+                            try:
+                                c = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+                                c.admin.command("ping")
+                                client = c
+                                break
+                            except Exception:
+                                pass
+                        if client is not None:
+                            coll = client[dbn]["stock_day"]
+
+                            # helper: limit pct tiering
+                            def _lpct(code: str) -> float:
+                                if limit_tiering and str(code).startswith(("300", "301")):
+                                    return 0.20
+                                return float(limit_pct)
+
+                            # helper: near in bps
+                            def _near(a: float, b: float) -> bool:
+                                if b == 0:
+                                    return abs(a - b) <= 1e-6
+                                return abs(a - b) <= abs(b) * (float(limit_price_eps_bps) / 10000.0)
+
+                            # candidates that are buys (not in prev_set)
+                            buy_list = [c for c in picks if c not in prev_set]
+                            if buy_list:
+                                # fetch today + prev close
+                                end = asof
+                                start = asof - pd.Timedelta(days=10)
+                                start_s = str(start.date()); end_s = str(end.date())
+                                start2 = start.strftime("%Y%m%d"); end2 = end.strftime("%Y%m%d")
+
+                                for code in buy_list:
+                                    code6 = str(code).zfill(6)
+                                    q = {"code": code6, "$or": [{"date": {"$gte": start_s, "$lte": end_s}}, {"date": {"$gte": start2, "$lte": end2}}]}
+                                    rows = list(coll.find(q, {"_id": 0, "date": 1, "high": 1, "low": 1, "close": 1}).sort("date", 1))
+                                    if len(rows) < 2:
+                                        continue
+                                    df = pd.DataFrame(rows)
+                                    df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed", errors="coerce")
+                                    df = df.dropna(subset=["date"]).sort_values("date")
+                                    df = df[df["date"] <= asof]
+                                    if df.shape[0] < 2:
+                                        continue
+                                    today = df.iloc[-1]
+                                    prev = df.iloc[-2]
+                                    pc = float(prev.get("close", 0.0) or 0.0)
+                                    hh = float(today.get("high", 0.0) or 0.0)
+                                    cc = float(today.get("close", 0.0) or 0.0)
+                                    # touch mode
+                                    lp = _lpct(code6)
+                                    up_lim = pc * (1.0 + lp)
+                                    if limit_touch_mode == "hl":
+                                        touch_up = hh >= up_lim and _near(hh, up_lim)
+                                    else:
+                                        touch_up = abs(cc - hh) <= float(limit_touch_eps) and _near(cc, up_lim)
+                                    if touch_up:
+                                        blocked_buys.add(code)
+
+                    if blocked_buys:
+                        # remove blocked buys and fill from backups
+                        keep = [c for c in picks if c not in blocked_buys]
+                        held = set(prev_set) | set(keep)
+                        add = []
+                        for c in backups:
+                            if c not in held:
+                                add.append(c)
+                            if len(add) >= len(blocked_buys):
+                                break
+                        picks = keep + add
 
                 # tranche equal weights
                 tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
@@ -1063,6 +1191,13 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             meta_extra = {
                 "ma_mode": ma_mode,
                 "score_mode": score_mode,
+                "execution_mode": execution_mode,
+                "backup_k": backup_k,
+                "limit_tiering": limit_tiering,
+                "limit_pct": limit_pct,
+                "limit_price_eps_bps": limit_price_eps_bps,
+                "limit_touch_mode": limit_touch_mode,
+                "limit_touch_eps": limit_touch_eps,
                 "score_weights": {
                     "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
                     "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
