@@ -83,6 +83,8 @@ def fetch_panel_mixed_dates(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
     """Fetch OHLC (and optional volume/amount) panels from Mongo.
 
+    volume_field should be one of: amount/vol/volume/money (detected upstream).
+
     Supports mixed `date` formats:
     - YYYY-MM-DD
     - YYYYMMDD (string)
@@ -898,7 +900,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         fac_windows=fac_windows,
     )
 
-    # rolling liquidity for impact model
+    # rolling liquidity for impact model: use the detected liquidity field (prefer amount)
     liq20 = None
     if vol is not None:
         liq20 = vol.rolling(int(args.fac_liq_20d)).mean()
@@ -924,6 +926,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "rebalance": "weekly",
         "top_k": int(args.topk),
         "candidate_k": int(args.candidate_k),
+        "backup_k": int(args.backup_k),
         "lookback": int(args.lookback),
         "ma": int(args.ma),
         "ma_mode": str(args.ma_mode),
@@ -937,15 +940,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "cost_bps": float(args.cost_bps),
         "impact_k": float(args.impact_k),
         "impact_floor": float(args.impact_floor),
-        "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
+        "impact_liq_field": volume_field,
         "limit_move_mode": str(args.limit_move_mode),
-        "limit_touch_eps": float(args.limit_touch_eps),
-        "backup_k": int(args.backup_k),
         "limit_pct": float(args.limit_pct),
         "limit_tiering": bool(args.limit_tiering),
+        "limit_touch_mode": str(args.limit_touch_mode),
+        "limit_touch_eps": float(args.limit_touch_eps),
         "limit_price_eps": float(args.limit_price_eps),
         "limit_price_eps_bps": float(args.limit_price_eps_bps),
-        "limit_touch_mode": str(args.limit_touch_mode),
+        "max_abs_ret_1d": (None if args.max_abs_ret_1d is None else float(args.max_abs_ret_1d)),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
         "regime_switch": bool(args.regime_switch),
@@ -957,7 +960,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "cash_down": float(args.cash_down),
         "side_band": float(args.side_band),
         "factor_windows": fac_windows,
-        "liq_field": volume_field,
+        "liq_field_detected": volume_field,
         "generated_at": int(time.time()),
         "internal": st,
         "universe_size": int(close.shape[1]),
