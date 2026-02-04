@@ -314,6 +314,43 @@ def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     return df.groupby("date", sort=True, group_keys=False).apply(_one_day)
 
 
+def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq_20d") -> Dict[str, float]:
+    """Estimate factor exposure to a size/liquidity proxy.
+
+    Without true market value, we use log(liq_20d + eps) as a proxy and compute
+    average (over dates) cross-sectional Spearman correlation.
+    """
+    eps = 1e-12
+
+    def _one_day(sub: pd.DataFrame) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        if proxy_col not in sub.columns:
+            return out
+        p = sub[proxy_col]
+        p = np.log(pd.to_numeric(p, errors="coerce").fillna(0.0) + eps)
+        for c in cols:
+            x = sub[c]
+            m = x.notna() & p.notna()
+            if int(m.sum()) < 200:
+                out[c] = float("nan")
+                continue
+            out[c] = float(x[m].rank(method="average").corr(p[m].rank(method="average")))
+        return out
+
+    rows = []
+    for d, sub in df.groupby("date", sort=True):
+        r = _one_day(sub)
+        if r:
+            r["date"] = d
+            rows.append(r)
+
+    if not rows:
+        return {c: float("nan") for c in cols}
+
+    tmp = pd.DataFrame(rows).set_index("date").sort_index()
+    return {c: float(tmp[c].dropna().mean()) if c in tmp.columns else float("nan") for c in cols}
+
+
 def _rankic_for_date(sub: pd.DataFrame, fac: str, target: str) -> float:
     x = sub[fac]
     y = sub[target]
@@ -377,6 +414,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--winsor-pct", type=float, default=0.01, help="Cross-sectional winsorize percent per tail (0=disable)")
     ap.add_argument("--zscore", type=int, default=1, help="1=apply cross-sectional z-score per date")
     ap.add_argument("--industry-neutral", type=int, default=0, help="1=industry demean per date (requires stock_list.industry)")
+    ap.add_argument("--mv-neutral", type=int, default=0, help="1=size neutralize per date (requires mv data; placeholder)")
     ap.add_argument("--outdir", default=None)
     args = ap.parse_args(argv)
 
@@ -443,6 +481,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if int(args.industry_neutral) == 1 and (df.get("industry") is not None) and (df["industry"].astype(str) != "").any():
         df = industry_demean_by_date(df, fac_cols)
 
+    # Placeholder: mv-neutralization requires mv data (not present in stock_day).
+    mv_available = False
+    if int(args.mv_neutral) == 1 and not mv_available:
+        pass
+
     factors = fac_cols
 
     # keep rows where at least one factor + one target exists
@@ -469,6 +512,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "zscore": bool(int(args.zscore) == 1),
             "industry_neutral": bool(int(args.industry_neutral) == 1),
             "industry_source": "stock_list.industry" if bool(ind_map) else None,
+            "mv_neutral": bool(int(args.mv_neutral) == 1),
+            "mv_source": None,
         },
         "metrics": {},
     }
@@ -524,6 +569,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         # average matrix
         mats = [c.drop(columns=["date"]) if "date" in c.columns else c for c in corr_rows]
         summary["factor_corr_spearman_avg"] = pd.concat(mats).groupby(level=0).mean().to_dict()
+
+    # size/liquidity proxy exposures (for interpretability)
+    summary["size_proxy"] = {
+        "proxy": "log(liq_20d)",
+        "spearman_corr_avg_by_factor": size_proxy_exposure(df, factors, proxy_col="liq_20d"),
+        "note": "No true market value in stock_day; this is a diagnostic only.",
+    }
 
     # write outputs
     (outdir / "report.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
