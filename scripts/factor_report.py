@@ -263,6 +263,27 @@ def load_industry_map(db: pymongo.database.Database) -> Dict[str, str]:
     return out
 
 
+def load_mv_panel(db: pymongo.database.Database, codes: List[str], start: str, end: str) -> pd.DataFrame:
+    """Load mv_day as a long panel with columns: date, code, float_mv, total_mv."""
+    if "mv_day" not in db.list_collection_names():
+        return pd.DataFrame(columns=["date", "code", "float_mv", "total_mv"])
+
+    coll = db["mv_day"]
+    proj = {"_id": 0, "date": 1, "code": 1, "float_mv": 1, "total_mv": 1}
+    cur = coll.find({"code": {"$in": codes}, "date": {"$gte": start, "$lte": end}}, proj, no_cursor_timeout=True)
+    rows = list(cur)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["float_mv"] = pd.to_numeric(df.get("float_mv"), errors="coerce")
+    df["total_mv"] = pd.to_numeric(df.get("total_mv"), errors="coerce")
+    df = df.dropna(subset=["date", "code"])
+    df = df.sort_values(["code", "date"]).drop_duplicates(subset=["code", "date"], keep="last")
+    return df
+
+
 def winsorize_by_date(df: pd.DataFrame, cols: List[str], pct: float) -> pd.DataFrame:
     if pct <= 0:
         return df
@@ -315,21 +336,14 @@ def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 
 
 def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq_20d") -> Dict[str, float]:
-    """Estimate factor exposure to a size/liquidity proxy.
-
-    Without true market value, we use log(liq_20d + eps) as a proxy and compute
-    average (over dates) cross-sectional Spearman correlation.
-    """
+    """Estimate factor exposure to a size/liquidity proxy."""
     eps = 1e-12
 
     def _one_day(sub: pd.DataFrame) -> Dict[str, float]:
         out: Dict[str, float] = {}
         if proxy_col not in sub.columns:
             return out
-        p = sub[proxy_col]
-        # liq should be >=0, but guard against dirty data
-        pv = pd.to_numeric(p, errors="coerce").fillna(0.0)
-        pv = pv.clip(lower=0.0)
+        pv = pd.to_numeric(sub[proxy_col], errors="coerce").fillna(0.0).clip(lower=0.0)
         p = np.log(pv + eps)
         for c in cols:
             x = sub[c]
@@ -352,6 +366,69 @@ def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq
 
     tmp = pd.DataFrame(rows).set_index("date").sort_index()
     return {c: float(tmp[c].dropna().mean()) if c in tmp.columns else float("nan") for c in cols}
+
+
+def size_exposure_from_mv(df: pd.DataFrame, cols: List[str], mv_col: str = "float_mv") -> Dict[str, float]:
+    """Estimate average daily Spearman corr between factor and log(mv)."""
+    eps = 1e-12
+
+    def _one_day(sub: pd.DataFrame) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        mv = pd.to_numeric(sub.get(mv_col), errors="coerce")
+        if mv is None:
+            return out
+        mv = mv.fillna(0.0).clip(lower=0.0)
+        p = np.log(mv + eps)
+        for c in cols:
+            x = sub[c]
+            m = x.notna() & p.notna()
+            if int(m.sum()) < 200:
+                out[c] = float("nan")
+                continue
+            out[c] = float(x[m].rank(method="average").corr(p[m].rank(method="average")))
+        return out
+
+    rows = []
+    for d, sub in df.groupby("date", sort=True):
+        r = _one_day(sub)
+        if r:
+            r["date"] = d
+            rows.append(r)
+
+    if not rows:
+        return {c: float("nan") for c in cols}
+
+    tmp = pd.DataFrame(rows).set_index("date").sort_index()
+    return {c: float(tmp[c].dropna().mean()) if c in tmp.columns else float("nan") for c in cols}
+
+
+def mv_neutralize_by_date(df: pd.DataFrame, cols: List[str], mv_col: str = "float_mv") -> pd.DataFrame:
+    """Neutralize factors vs log(mv) per date via linear regression residual.
+
+    For each date and factor:
+      x_neut = x - beta * log(mv)
+    where beta = cov(x,logmv)/var(logmv).
+    """
+    eps = 1e-12
+
+    def _one_day(sub: pd.DataFrame) -> pd.DataFrame:
+        out = sub.copy()
+        mv = pd.to_numeric(out.get(mv_col), errors="coerce").fillna(0.0).clip(lower=0.0)
+        p = np.log(mv + eps)
+        var = float(p.var(ddof=1))
+        if not (var > 1e-12):
+            return out
+        for c in cols:
+            x = out[c]
+            m = x.notna() & p.notna()
+            if int(m.sum()) < 200:
+                continue
+            cov = float(pd.Series(x[m]).cov(pd.Series(p[m]), ddof=1))
+            beta = cov / var
+            out.loc[m, c] = x[m] - beta * p[m]
+        return out
+
+    return df.groupby("date", sort=True, group_keys=False).apply(_one_day)
 
 
 def _rankic_for_date(sub: pd.DataFrame, fac: str, target: str) -> float:
@@ -484,10 +561,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if int(args.industry_neutral) == 1 and (df.get("industry") is not None) and (df["industry"].astype(str) != "").any():
         df = industry_demean_by_date(df, fac_cols)
 
-    # Placeholder: mv-neutralization requires mv data (not present in stock_day).
-    mv_available = False
-    if int(args.mv_neutral) == 1 and not mv_available:
-        pass
+    # MV data (optional)
+    mv_df = load_mv_panel(db, list(df["code"].unique()), str(args.start), str(args.end))
+    mv_available = (not mv_df.empty)
+    if mv_available:
+        df = df.merge(mv_df, on=["date", "code"], how="left")
+
+    if int(args.mv_neutral) == 1 and mv_available:
+        df = mv_neutralize_by_date(df, fac_cols, mv_col="float_mv")
 
     factors = fac_cols
 
@@ -516,7 +597,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "industry_neutral": bool(int(args.industry_neutral) == 1),
             "industry_source": "stock_list.industry" if bool(ind_map) else None,
             "mv_neutral": bool(int(args.mv_neutral) == 1),
-            "mv_source": None,
+            "mv_source": "mv_day.float_mv" if int(args.mv_neutral) == 1 else None,
         },
         "metrics": {},
     }
@@ -577,8 +658,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary["size_proxy"] = {
         "proxy": "log(liq_20d)",
         "spearman_corr_avg_by_factor": size_proxy_exposure(df, factors, proxy_col="liq_20d"),
-        "note": "No true market value in stock_day; this is a diagnostic only.",
+        "note": "Liquidity proxy exposure diagnostic.",
     }
+    if mv_available:
+        summary["size_mv"] = {
+            "proxy": "log(float_mv)",
+            "spearman_corr_avg_by_factor": size_exposure_from_mv(df, factors, mv_col="float_mv"),
+            "note": "Uses mv_day.float_mv (circulating market value).",
+        }
 
     # write outputs
     (outdir / "report.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
