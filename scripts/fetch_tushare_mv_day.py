@@ -91,10 +91,12 @@ def tushare_pro():
     http_url = os.getenv("TUSHARE_HTTP_URL", "").strip()
 
     if http_url:
+        # Forwarder token may differ from the raw Tushare token.
+        fwd_token = os.getenv("TUSHARE_PROXY_TOKEN", "").strip() or token
         pro = ts.pro_api("DUMMY")
         # Inject token + forwarder URL (best-effort, internal attributes)
         try:
-            pro._DataApi__token = token  # type: ignore[attr-defined]
+            pro._DataApi__token = fwd_token  # type: ignore[attr-defined]
             pro._DataApi__http_url = http_url  # type: ignore[attr-defined]
         except Exception as e:
             raise RuntimeError(f"failed to init tushare forwarder mode: {e!r}")
