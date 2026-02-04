@@ -284,19 +284,12 @@ def fetch_panel(
     if volume_field:
         proj[volume_field] = 1
 
-    # Mongo `date` field can be stored as either "YYYY-MM-DD" or "YYYYMMDD" (legacy imports).
-    # To avoid silently truncating the panel, query both formats.
-    start2 = start.replace("-", "")
-    end2 = end.replace("-", "")
-
+    # Dates are normalized to ISO strings (YYYY-MM-DD) by migration.
     for code in codes:
         cursor = coll.find(
             {
                 "code": code,
-                "$or": [
-                    {"date": {"$gte": start, "$lte": end}},
-                    {"date": {"$gte": start2, "$lte": end2}},
-                ],
+                "date": {"$gte": start, "$lte": end},
             },
             proj,
         ).sort("date", 1)
@@ -304,8 +297,7 @@ def fetch_panel(
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        # date can be mixed formats (YYYYMMDD from Tushare; YYYY-MM-DD legacy). Use mixed parser.
-        df["date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
         df = df.drop_duplicates(subset=["date"]).set_index("date")
 
