@@ -238,6 +238,7 @@ def build_weights_on_rebalance(
     limit_move_mode: str,
     limit_touch_eps: float,
     limit_pct: float,
+    limit_tiering: bool,
     limit_price_eps: float,
     min_bars: int,
     score_weights_up: Dict[str, float],
@@ -486,7 +487,16 @@ def build_weights_on_rebalance(
             # - sell attempt blocked if close is at/near down-limit
             eps_touch = float(limit_touch_eps)
             eps_price = float(limit_price_eps)
-            lpct = float(limit_pct)
+            base_lpct = float(limit_pct)
+
+            def _limit_pct_for(code: str) -> float:
+                if not limit_tiering:
+                    return base_lpct
+                # ChiNext (创业板) 20%: 300/301
+                if str(code).startswith(("300", "301")):
+                    return 0.20
+                # TODO: ST 5% (requires ST flag)
+                return base_lpct
 
             c_today = close.loc[d, cols]
             hi_today = h.loc[d, cols]
@@ -512,6 +522,7 @@ def build_weights_on_rebalance(
                 at_high = abs(float(cc) - float(hh)) <= eps_touch
                 at_low = abs(float(cc) - float(ll)) <= eps_touch
 
+                lpct = _limit_pct_for(str(c))
                 up_lim = float(pc) * (1.0 + lpct)
                 dn_lim = float(pc) * (1.0 - lpct)
 
@@ -701,7 +712,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--limit-pct",
         type=float,
         default=0.10,
-        help="Price limit percentage used for limit-touch detection in freeze mode (default 10%).",
+        help="Base price limit percentage used for limit-touch detection in freeze mode (default 10%).",
+    )
+    ap.add_argument(
+        "--limit-tiering",
+        action="store_true",
+        default=False,
+        help="Use A-share style tiered limits: 20% for 300/301 (ChiNext), otherwise base limit_pct. (ST 5% not implemented yet)",
     )
     ap.add_argument(
         "--limit-price-eps",
@@ -833,6 +850,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit_move_mode=str(args.limit_move_mode),
         limit_touch_eps=float(args.limit_touch_eps),
         limit_pct=float(args.limit_pct),
+        limit_tiering=bool(args.limit_tiering),
         limit_price_eps=float(args.limit_price_eps),
         min_bars=int(args.min_bars),
         score_weights_up=score_weights_up,
@@ -893,6 +911,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "limit_touch_eps": float(args.limit_touch_eps),
         "backup_k": int(args.backup_k),
         "limit_pct": float(args.limit_pct),
+        "limit_tiering": bool(args.limit_tiering),
         "limit_price_eps": float(args.limit_price_eps),
         "score_weights_up": score_weights_up,
         "score_weights_down": score_weights_down,
