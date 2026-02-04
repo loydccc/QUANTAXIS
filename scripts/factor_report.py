@@ -284,7 +284,15 @@ def load_mv_panel(db: pymongo.database.Database, codes: List[str], start: str, e
     return df
 
 
+def _ensure_date_not_index(df: pd.DataFrame) -> pd.DataFrame:
+    # Avoid pandas ambiguity when a groupby-apply creates 'date' as an index level.
+    if "date" in list(getattr(df.index, "names", [])):
+        return df.reset_index(drop=True)
+    return df
+
+
 def winsorize_by_date(df: pd.DataFrame, cols: List[str], pct: float) -> pd.DataFrame:
+    df = _ensure_date_not_index(df)
     if pct <= 0:
         return df
     pct = float(pct)
@@ -302,10 +310,13 @@ def winsorize_by_date(df: pd.DataFrame, cols: List[str], pct: float) -> pd.DataF
             out[c] = x.clip(ql, qh)
         return out
 
-    return df.groupby("date", sort=True, group_keys=False).apply(_w)
+    out = df.groupby("date", sort=True, group_keys=False).apply(_w)
+    return _ensure_date_not_index(out)
 
 
 def zscore_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    df = _ensure_date_not_index(df)
+
     def _z(sub: pd.DataFrame) -> pd.DataFrame:
         out = sub.copy()
         for c in cols:
@@ -318,11 +329,13 @@ def zscore_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
                 out[c] = (x - m) / s
         return out
 
-    return df.groupby("date", sort=True, group_keys=False).apply(_z)
+    out = df.groupby("date", sort=True, group_keys=False).apply(_z)
+    return _ensure_date_not_index(out)
 
 
 def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     """Demean factors by industry per date (simple industry neutralization)."""
+    df = _ensure_date_not_index(df)
 
     def _one_day(sub: pd.DataFrame) -> pd.DataFrame:
         out = sub.copy()
@@ -332,7 +345,8 @@ def industry_demean_by_date(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
             out[c] = out[c] - out.groupby("industry")[c].transform("mean")
         return out
 
-    return df.groupby("date", sort=True, group_keys=False).apply(_one_day)
+    out = df.groupby("date", sort=True, group_keys=False).apply(_one_day)
+    return _ensure_date_not_index(out)
 
 
 def size_proxy_exposure(df: pd.DataFrame, cols: List[str], proxy_col: str = "liq_20d") -> Dict[str, float]:
@@ -403,12 +417,8 @@ def size_exposure_from_mv(df: pd.DataFrame, cols: List[str], mv_col: str = "floa
 
 
 def mv_neutralize_by_date(df: pd.DataFrame, cols: List[str], mv_col: str = "float_mv") -> pd.DataFrame:
-    """Neutralize factors vs log(mv) per date via linear regression residual.
-
-    For each date and factor:
-      x_neut = x - beta * log(mv)
-    where beta = cov(x,logmv)/var(logmv).
-    """
+    """Neutralize factors vs log(mv) per date via linear regression residual."""
+    df = _ensure_date_not_index(df)
     eps = 1e-12
 
     def _one_day(sub: pd.DataFrame) -> pd.DataFrame:
@@ -428,7 +438,8 @@ def mv_neutralize_by_date(df: pd.DataFrame, cols: List[str], mv_col: str = "floa
             out.loc[m, c] = x[m] - beta * p[m]
         return out
 
-    return df.groupby("date", sort=True, group_keys=False).apply(_one_day)
+    out = df.groupby("date", sort=True, group_keys=False).apply(_one_day)
+    return _ensure_date_not_index(out)
 
 
 def _rankic_for_date(sub: pd.DataFrame, fac: str, target: str) -> float:
