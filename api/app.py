@@ -644,16 +644,29 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
         proj[liq_field] = 1
 
     fac: Dict[str, Dict[str, float]] = {}
+    # Support mixed Mongo date formats seen in this repo:
+    # - "YYYY-MM-DD" strings
+    # - YYYYMMDD ints/strings
+    start_s = str(start_dt.date())
+    end_s = str(end_dt.date())
+    start_i = int(start_dt.strftime("%Y%m%d"))
+    end_i = int(end_dt.strftime("%Y%m%d"))
+
     for code in codes:
-        cursor = coll.find(
-            {"code": code, "date": {"$gte": str(start_dt.date()), "$lte": str(end_dt.date())}},
-            proj,
-        ).sort("date", 1)
+        q = {
+            "code": code,
+            "$or": [
+                {"date": {"$gte": start_s, "$lte": end_s}},
+                {"date": {"$gte": start_i, "$lte": end_i}},
+            ],
+        }
+        cursor = coll.find(q, proj).sort("date", 1)
         rows = list(cursor)
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        df["date"] = pd.to_datetime(df["date"])
+        # to_datetime can't reliably parse int + str mixtures unless coerced
+        df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed")
         df = df.drop_duplicates(subset=["date"]).set_index("date").sort_index()
         if "close" not in df.columns:
             continue
