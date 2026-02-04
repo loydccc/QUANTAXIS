@@ -93,6 +93,7 @@ def main() -> None:
     ap.add_argument("--on-dup", default="skip", choices=["skip", "delete_source"], help="What to do if normalizing date causes duplicate key on (code,date). skip=leave as-is; delete_source=delete the doc being updated")
     ap.add_argument("--batch", type=int, default=2000)
     ap.add_argument("--limit", type=int, default=0, help="Limit docs scanned (0=all)")
+    ap.add_argument("--progress", type=int, default=200000, help="Print progress every N scanned docs (0=disable)")
     args = ap.parse_args()
 
     coll = _connect(args.uri, args.db, user=args.user, password=args.password, authdb=args.authdb)
@@ -115,6 +116,9 @@ def main() -> None:
     try:
         for doc in cursor:
             scanned += 1
+            if args.progress and scanned % int(args.progress) == 0:
+                mode = "APPLY" if args.apply else "DRY-RUN"
+                print(f"[{mode}] progress scanned={scanned} changed={changed} skipped={skipped} dup_conflicts={dup_conflicts} dup_deleted={dup_deleted}")
             old = doc.get("date")
             new = _parse_to_iso_date(old)
             if new is None:
