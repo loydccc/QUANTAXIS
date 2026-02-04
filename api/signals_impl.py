@@ -255,26 +255,21 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
     if liq_field:
         proj[liq_field] = 1
 
-    # mixed date formats
+    # Dates are normalized to ISO strings (YYYY-MM-DD) by migration.
     start_s = str(start_dt.date())
     end_s = str(end_dt.date())
-    start_i = int(start_dt.strftime("%Y%m%d"))
-    end_i = int(end_dt.strftime("%Y%m%d"))
 
     fac: Dict[str, Dict[str, float]] = {}
     for code in codes:
         q = {
             "code": str(code).zfill(6),
-            "$or": [
-                {"date": {"$gte": start_s, "$lte": end_s}},
-                {"date": {"$gte": start_i, "$lte": end_i}},
-            ],
+            "date": {"$gte": start_s, "$lte": end_s},
         }
         rows = list(coll.find(q, proj).sort("date", 1))
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed", errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).set_index("date").sort_index()
         if "close" not in df.columns:
             continue
