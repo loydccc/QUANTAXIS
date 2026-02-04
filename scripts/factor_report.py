@@ -9,7 +9,7 @@ Universe:
 
 Data:
 - Reads Mongo quantaxis.stock_day (expects fields: code, date, close, amount/vol/money).
-- Handles mixed date formats (YYYYMMDD and YYYY-MM-DD).
+- Assumes `date` is normalized to ISO strings (YYYY-MM-DD).
 
 Outputs:
 - output/reports/factor_reports/<run_id>/report.json
@@ -175,13 +175,6 @@ def detect_liq_field(coll: pymongo.collection.Collection) -> Optional[str]:
     return None
 
 
-def _norm_date_str(x: str) -> str:
-    x = str(x)
-    if "-" in x:
-        return x.replace("-", "")
-    return x
-
-
 def fetch_long_panel(
     coll: pymongo.collection.Collection,
     codes: List[str],
@@ -189,11 +182,10 @@ def fetch_long_panel(
     end: str,
     liq_field: Optional[str],
 ) -> pd.DataFrame:
-    """Fetch (date, code, close, liq) long-form dataframe."""
-    start1 = start
-    end1 = end
-    start2 = start.replace("-", "")
-    end2 = end.replace("-", "")
+    """Fetch (date, code, close, liq) long-form dataframe.
+
+    Assumes stock_day.date is an ISO string (YYYY-MM-DD).
+    """
 
     proj = {"_id": 0, "code": 1, "date": 1, "close": 1}
     if liq_field:
@@ -202,10 +194,7 @@ def fetch_long_panel(
     cur = coll.find(
         {
             "code": {"$in": codes},
-            "$or": [
-                {"date": {"$gte": start1, "$lte": end1}},
-                {"date": {"$gte": start2, "$lte": end2}},
-            ],
+            "date": {"$gte": start, "$lte": end},
         },
         proj,
         no_cursor_timeout=True,
@@ -220,7 +209,7 @@ def fetch_long_panel(
 
     # normalize
     df["code"] = df["code"].astype(str).str.zfill(6)
-    df["date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date", "code", "close"])
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["close"]).copy()
@@ -384,6 +373,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "universe_size_raw": int(len(codes)),
         "universe_size_eligible": int(df["code"].nunique()),
         "liq_field_detected": liq_field,
+        "date_format": "YYYY-MM-DD",
         "metrics": {},
     }
 
