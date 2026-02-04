@@ -210,6 +210,7 @@ def build_weights_on_rebalance(
     tranche_overlap: bool,
     liq_window: int,
     liq_min_ratio: float,
+    liq_min_quantile: Optional[float],
     min_bars: int,
     score_weights: Dict[str, float],
     fac_windows: Dict[str, int],
@@ -291,6 +292,20 @@ def build_weights_on_rebalance(
             continue
 
         cand = sorted(list(candidates))
+
+        # Optional liquidity quantile filter on candidates (cross-sectional, at rebalance date)
+        if liq_min_quantile is not None:
+            q = float(liq_min_quantile)
+            q = max(0.0, min(1.0, q))
+            if q > 0:
+                if liq20 is None:
+                    # can't apply if we don't have a liquidity field
+                    pass
+                else:
+                    lraw = liq20.loc[d, cand].replace([np.inf, -np.inf], np.nan).dropna()
+                    if not lraw.empty:
+                        thr = float(lraw.quantile(q))
+                        cand = [c for c in cand if float(lraw.get(c, -np.inf)) >= thr]
 
         # Build factor score on candidates
         r10 = ret10.loc[d, cand]
@@ -404,6 +419,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--min-bars", type=int, default=800)
     ap.add_argument("--liq-window", type=int, default=20)
     ap.add_argument("--liq-min-ratio", type=float, default=1.0)
+    ap.add_argument(
+        "--liq-min-quantile",
+        type=float,
+        default=None,
+        help="Optional cross-sectional liquidity filter on rebalance dates. Example: 0.2 keeps top 80% by liq_20d.",
+    )
 
     ap.add_argument("--hold-weeks", type=int, default=2)
     ap.add_argument("--tranche-overlap", action="store_true", default=True)
@@ -480,6 +501,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         tranche_overlap=bool(args.tranche_overlap),
         liq_window=int(args.liq_window),
         liq_min_ratio=float(args.liq_min_ratio),
+        liq_min_quantile=(None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
         min_bars=int(args.min_bars),
         score_weights=score_weights,
         fac_windows=fac_windows,
@@ -505,6 +527,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "min_bars": int(args.min_bars),
         "liq_window": int(args.liq_window),
         "liq_min_ratio": float(args.liq_min_ratio),
+        "liq_min_quantile": (None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
         "hold_weeks": int(args.hold_weeks),
         "tranche_overlap": bool(args.tranche_overlap),
         "cost_bps": float(args.cost_bps),
