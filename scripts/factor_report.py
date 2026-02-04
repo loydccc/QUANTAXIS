@@ -617,12 +617,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         df = df.reset_index(drop=True)
 
     fac_cols = raw_factors.copy()
+    debug = os.getenv("FACTOR_REPORT_DEBUG", "").strip() in {"1", "true", "yes"}
     if float(args.winsor_pct) > 0:
         df = winsorize_by_date(df, fac_cols, pct=float(args.winsor_pct))
+        if debug:
+            print({"stage": "winsor", "cols": list(df.columns), "index_names": list(getattr(df.index, "names", [])), "n": int(df.shape[0])})
     if int(args.zscore) == 1:
         df = zscore_by_date(df, fac_cols)
+        if debug:
+            print({"stage": "zscore", "cols": list(df.columns), "index_names": list(getattr(df.index, "names", [])), "n": int(df.shape[0])})
     if int(args.industry_neutral) == 1 and (df.get("industry") is not None) and (df["industry"].astype(str) != "").any():
         df = industry_demean_by_date(df, fac_cols)
+        if debug:
+            print({"stage": "ind_neut", "cols": list(df.columns), "index_names": list(getattr(df.index, "names", [])), "n": int(df.shape[0])})
 
     # MV data (optional)
     mv_df = load_mv_panel(db, list(df["code"].unique()), str(args.start), str(args.end))
