@@ -211,6 +211,7 @@ def build_weights_on_rebalance(
     liq_window: int,
     liq_min_ratio: float,
     liq_min_quantile: Optional[float],
+    vol_max_quantile: Optional[float],
     min_bars: int,
     score_weights: Dict[str, float],
     fac_windows: Dict[str, int],
@@ -297,15 +298,21 @@ def build_weights_on_rebalance(
         if liq_min_quantile is not None:
             q = float(liq_min_quantile)
             q = max(0.0, min(1.0, q))
-            if q > 0:
-                if liq20 is None:
-                    # can't apply if we don't have a liquidity field
-                    pass
-                else:
-                    lraw = liq20.loc[d, cand].replace([np.inf, -np.inf], np.nan).dropna()
-                    if not lraw.empty:
-                        thr = float(lraw.quantile(q))
-                        cand = [c for c in cand if float(lraw.get(c, -np.inf)) >= thr]
+            if q > 0 and liq20 is not None:
+                lraw = liq20.loc[d, cand].replace([np.inf, -np.inf], np.nan).dropna()
+                if not lraw.empty:
+                    thr = float(lraw.quantile(q))
+                    cand = [c for c in cand if float(lraw.get(c, -np.inf)) >= thr]
+
+        # Optional volatility max-quantile filter (drop the most volatile tail)
+        if vol_max_quantile is not None:
+            q = float(vol_max_quantile)
+            q = max(0.0, min(1.0, q))
+            if q < 1.0:
+                vraw = vol20.loc[d, cand].replace([np.inf, -np.inf], np.nan).dropna()
+                if not vraw.empty:
+                    thr = float(vraw.quantile(q))
+                    cand = [c for c in cand if float(vraw.get(c, np.inf)) <= thr]
 
         # Build factor score on candidates
         r10 = ret10.loc[d, cand]
@@ -425,6 +432,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Optional cross-sectional liquidity filter on rebalance dates. Example: 0.2 keeps top 80% by liq_20d.",
     )
+    ap.add_argument(
+        "--vol-max-quantile",
+        type=float,
+        default=None,
+        help="Optional cross-sectional volatility filter on rebalance dates. Example: 0.9 keeps the lowest 90% by vol_20d (drops top 10%).",
+    )
 
     ap.add_argument("--hold-weeks", type=int, default=2)
     ap.add_argument("--tranche-overlap", action="store_true", default=True)
@@ -502,6 +515,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         liq_window=int(args.liq_window),
         liq_min_ratio=float(args.liq_min_ratio),
         liq_min_quantile=(None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
+        vol_max_quantile=(None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
         min_bars=int(args.min_bars),
         score_weights=score_weights,
         fac_windows=fac_windows,
@@ -528,6 +542,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "liq_window": int(args.liq_window),
         "liq_min_ratio": float(args.liq_min_ratio),
         "liq_min_quantile": (None if args.liq_min_quantile is None else float(args.liq_min_quantile)),
+        "vol_max_quantile": (None if args.vol_max_quantile is None else float(args.vol_max_quantile)),
         "hold_weeks": int(args.hold_weeks),
         "tranche_overlap": bool(args.tranche_overlap),
         "cost_bps": float(args.cost_bps),
