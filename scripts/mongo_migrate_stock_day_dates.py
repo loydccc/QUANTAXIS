@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Normalize stock_day.date to a single canonical format.
+
+Why: mixed formats (YYYYMMDD ints/strings + YYYY-MM-DD strings) make every
+factor/backtest query more complex and error-prone. This script migrates
+"stock_day" docs to ISO date strings: YYYY-MM-DD.
+
+- Safe-by-default: dry-run unless --apply is passed.
+- Idempotent: re-running should result in 0 changes after convergence.
+
+Example:
+  python scripts/mongo_migrate_stock_day_dates.py --db quantaxis --apply
+
+If you run Mongo in docker, pass --uri accordingly.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+from typing import Any, Optional, Tuple
+
+import pymongo
+
+
+def _parse_to_iso_date(v: Any) -> Optional[str]:
+    """Return YYYY-MM-DD or None if unparseable."""
+    if v is None:
+        return None
+
+    # Mongo Date
+    if isinstance(v, dt.datetime):
+        return v.date().isoformat()
+    if isinstance(v, dt.date):
+        return v.isoformat()
+
+    # int like 20260203
+    if isinstance(v, int):
+        s = str(v)
+        if len(s) == 8 and s.isdigit():
+            try:
+                d = dt.date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+                return d.isoformat()
+            except Exception:
+                return None
+        return None
+
+    # string: 'YYYYMMDD' or 'YYYY-MM-DD'
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        if len(s) == 8 and s.isdigit():
+            try:
+                d = dt.date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+                return d.isoformat()
+            except Exception:
+                return None
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            # basic sanity
+            try:
+                d = dt.date(int(s[0:4]), int(s[5:7]), int(s[8:10]))
+                return d.isoformat()
+            except Exception:
+                return None
+        return None
+
+    return None
+
+
+def _connect(uri: str, db: str) -> pymongo.collection.Collection:
+    client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client.admin.command("ping")
+    return client[db]["stock_day"]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--uri", default="mongodb://localhost:27017", help="Mongo URI")
+    ap.add_argument("--db", default="quantaxis", help="Database name")
+    ap.add_argument("--apply", action="store_true", help="Actually write changes")
+    ap.add_argument("--batch", type=int, default=2000)
+    ap.add_argument("--limit", type=int, default=0, help="Limit docs scanned (0=all)")
+    args = ap.parse_args()
+
+    coll = _connect(args.uri, args.db)
+
+    q = {"date": {"$exists": True}}
+    proj = {"_id": 1, "date": 1}
+
+    cursor = coll.find(q, proj, no_cursor_timeout=True)
+    if args.limit and args.limit > 0:
+        cursor = cursor.limit(args.limit)
+
+    scanned = 0
+    changed = 0
+    skipped = 0
+
+    ops = []
+
+    try:
+        for doc in cursor:
+            scanned += 1
+            old = doc.get("date")
+            new = _parse_to_iso_date(old)
+            if new is None:
+                skipped += 1
+                continue
+            if isinstance(old, str) and old.strip() == new:
+                continue
+            # normalize everything to string
+            ops.append(
+                pymongo.UpdateOne({"_id": doc["_id"]}, {"$set": {"date": new}})
+            )
+            changed += 1
+
+            if len(ops) >= args.batch:
+                if args.apply:
+                    coll.bulk_write(ops, ordered=False)
+                ops = []
+
+        if ops:
+            if args.apply:
+                coll.bulk_write(ops, ordered=False)
+
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+    mode = "APPLY" if args.apply else "DRY-RUN"
+    print(f"[{mode}] scanned={scanned} changed={changed} skipped_unparseable={skipped}")
+    if not args.apply:
+        print("Pass --apply to write changes.")
+
+
+if __name__ == "__main__":
+    main()
