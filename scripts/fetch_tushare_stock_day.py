@@ -203,7 +203,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     for code_batch in _chunks(codes, max(1, args.batch)):
         # Tushare daily endpoint supports ts_code; keep 1 per request to avoid surprises.
         for code in code_batch:
-            df = pro.daily(ts_code=code, start_date=args.start, end_date=args.end)
+            # Robust to transient Tushare rate-limits. The API often returns messages like:
+            #   "请求过于频繁 ... 23秒后可用"
+            # We back off and retry a few times instead of aborting the whole run.
+            df = None
+            last_err: Exception | None = None
+            for attempt in range(6):
+                try:
+                    df = pro.daily(ts_code=code, start_date=args.start, end_date=args.end)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    msg = str(e)
+                    # best-effort parse: "XX秒后可用"
+                    wait_s = None
+                    import re
+
+                    m = re.search(r"(\d+)\s*秒后可用", msg)
+                    if m:
+                        wait_s = int(m.group(1))
+                    # exponential-ish backoff with a floor
+                    if wait_s is None:
+                        wait_s = int(max(5, (attempt + 1) * max(1.0, args.sleep) * 10))
+                    print(f"[tushare] {code}: rate-limited/failed (attempt={attempt+1}/6), sleep {wait_s}s: {msg}")
+                    time.sleep(wait_s)
+            if last_err is not None:
+                print(f"[tushare] {code}: giving up after retries: {last_err}")
+                continue
+
             if df is None or df.empty:
                 print(f"[tushare] {code}: no data")
                 continue

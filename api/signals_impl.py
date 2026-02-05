@@ -597,6 +597,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
     # Fallback ladder + substitute asset (L3 only)
     fallback_asset = str(cfg.get("fallback_asset", FALLBACK_ASSET_DEFAULT))
+    disable_fallback = bool(cfg.get("disable_fallback", False))
 
     try:
         if strategy != "hybrid_baseline_weekly_topk":
@@ -635,6 +636,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         for ladder_level in ["L0", "L1", "L2"]:
             fallback_level = ladder_level
             tranche_objs = []
+            tranche_contribs = []
             hard_filter_stats = []
             final_port = {}
             final_scores = {}
@@ -905,10 +907,14 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
                 tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
 
+                contrib: Dict[str, float] = {}
                 for c, w in tranche_port.items():
-                    final_port[c] = final_port.get(c, 0.0) + scale * w
+                    dw = scale * w
+                    final_port[c] = final_port.get(c, 0.0) + dw
+                    contrib[c] = contrib.get(c, 0.0) + dw
                     final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
 
+                tranche_contribs.append(contrib)
                 tranche_objs.append({"rebalance_date": mom_tr[t]["rebalance_date"], "effective_date": mom_tr[t]["effective_date"], "picks": picks})
 
             # --- Ladder evaluation (use effective positions after min_weight) ---
@@ -937,10 +943,32 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 cap_stats = {"cap": cap, "n": len(eff_port)}
 
             eff_n = len(eff_port)
+            sum_w_after = float(sum(float(w) for w in eff_port.values()))
+            cash_w_nofb = float(max(0.0, 1.0 - sum_w_after))
+
+            # --- Per-tranche audit after min_weight (no effect on trading logic) ---
+            # NOTE: tranche_contribs sums to ~scale per tranche (e.g. 0.5) by construction.
+            # The audit requirement wants sum_weight_after_min_weight to reflect the *portfolio*
+            # (after min_weight) so that: sum_weight_after_min_weight + cash_weight_nofb == 1.
+            tranche_audit = []
+            for i, contrib in enumerate(tranche_contribs):
+                kept = {c: float(w) for c, w in (contrib or {}).items() if c in eff_port and float(w) >= float(min_weight or 0.0)}
+                tranche_audit.append(
+                    {
+                        "tranche": int(i),
+                        "effective_positions_after_min_weight": int(len(kept)),
+                        "sum_weight_after_min_weight": float(sum_w_after),
+                    }
+                )
+
             ladder_runs.append(
                 {
                     "level": ladder_level,
                     "effective_positions": eff_n,
+                    "effective_positions_after_min_weight": int(eff_n),
+                    "sum_weight_after_min_weight": float(sum_w_after),
+                    "cash_weight_nofb": float(cash_w_nofb),
+                    "tranche_audit": tranche_audit,
                     "min_weight": min_weight,
                     "downvol_mode": "hard+penalty" if ladder_level == "L0" else ("penalty_only" if ladder_level == "L1" else "penalty_only"),
                     "s_struct_floor": float(S_STRUCT_FLOOR_L1) if ladder_level == "L1" else None,
@@ -994,7 +1022,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
         # Fallback ladder (L3): if after L2 we still have too few names, park remaining weight in a substitute asset.
         eff_n = len(final_port)
-        if fallback_level == "L2" and eff_n < MIN_POS:
+        if (not disable_fallback) and fallback_level == "L2" and eff_n < MIN_POS:
             fallback_level = "L3"
             fallback_trigger_reason = "candidates<6 after L2"
             s = sum(max(0.0, float(w)) for w in final_port.values())
@@ -1058,6 +1086,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "level": fallback_level,
                 "trigger_reason": fallback_trigger_reason,
                 "asset": fallback_asset,
+                "disabled": disable_fallback,
             },
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,

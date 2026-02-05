@@ -743,9 +743,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         if vol_raw is not None:
             vol_raw = vol_raw.sort_index()
 
-    # Universe eligibility: require enough bars to support indicators/weekly rebalance.
+    # Universe eligibility (tradability / can-run strategy):
+    # IMPORTANT semantic shift:
+    # - args.min_bars is a *factor availability* threshold (handled upstream in gating/attribution),
+    #   NOT a global universe eligibility filter.
+    # - Here we only require enough price history to run the chosen baseline strategy.
     bars_per_code = close_raw.notna().sum(axis=0).astype(int)
-    eligible = bars_per_code[bars_per_code >= int(args.min_bars)].index.tolist()
+
+    # Minimal history to compute the strategy signals at all.
+    # Add a small buffer for weekly rebalance alignment + stability.
+    required_bars = max(5, int(args.lookback), int(args.ma), int(args.vol_window)) + 5
+
+    eligible = bars_per_code[bars_per_code >= int(required_bars)].index.tolist()
     dropped = sorted(set(close_raw.columns) - set(eligible))
 
     # Liquidity/suspension filter (optional): require recent close+volume to be present.
