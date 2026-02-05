@@ -216,13 +216,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 base_code = None
                 if isinstance(ts_code, str) and ts_code:
                     base_code = ts_code.split(".")[0]
+                td = str(r.get("trade_date") or "")
+                # Normalize to ISO date string for consistency with the rest of the stack.
+                # Tushare uses YYYYMMDD.
+                if len(td) == 8 and td.isdigit():
+                    date_iso = f"{td[0:4]}-{td[4:6]}-{td[6:8]}"
+                else:
+                    date_iso = td
+
                 records.append(
                     {
                         # Keep QUANTAXIS-style 6-digit code as primary key for compatibility
                         "code": base_code or ts_code,
                         # Preserve original tushare identifier for traceability
                         "ts_code": ts_code,
-                        "date": r.get("trade_date"),
+                        "date": date_iso,
                         "open": r.get("open"),
                         "high": r.get("high"),
                         "low": r.get("low"),
