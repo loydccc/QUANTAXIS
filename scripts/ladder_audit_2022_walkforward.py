@@ -257,6 +257,7 @@ def build_signal_for_date(
             elig = elig & amt_ok.loc[d]
 
     elig_codes = [c for c in cols if bool(elig.get(c, False))]
+    n0_universe = int(len(elig_codes))
     if not elig_codes:
         # force L3
         port = {FALLBACK_ASSET: 1.0} if enable_fallback else {}
@@ -399,10 +400,13 @@ def build_signal_for_date(
         eff_n = len(port2)
         info = {
             "level": level,
-            "candidates_after_dist": int(len(cand2)),
-            "candidates_after_downvol": int(len(cands)),
+            "N0_universe": int(n0_universe),
+            "N1_after_dist": int(len(cand2)),
+            "N2_after_downvol_hard": int(len(cands)) if level == "L0" else None,
+            "N3_after_score_valid": int(len(cands)),
+            "N4_after_min_weight": int(eff_n),
+            "N5_after_cap": int(eff_n) if level == "L2" else None,
             "downvol_mode": downvol_mode,
-            "effective_positions": int(eff_n),
             "l1_s_struct_floor": (S_STRUCT_FLOOR_L1 if level == "L1" else None),
             "l2_cap": cap,
         }
