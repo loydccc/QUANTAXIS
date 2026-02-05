@@ -229,7 +229,14 @@ def _zscore(s: Dict[str, float]) -> Dict[str, float]:
 
 
 def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str, Any]):
-    """Compute factor pack for codes at as_of_date from Mongo stock_day."""
+    """Compute factor pack for codes at as_of_date from Mongo stock_day.
+
+    Returns:
+      fac: {code -> factor dict}
+      liq_field: detected liquidity field name or None
+      reasons: {code -> reason string} for codes that were requested but did not get factors
+               (audit-only; does not affect trading logic)
+    """
     import pandas as pd
     import pymongo
 
@@ -292,18 +299,22 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
     end_s = str(end_dt.date())
 
     fac: Dict[str, Dict[str, float]] = {}
+    reasons: Dict[str, str] = {}
     for code in codes:
+        code6 = str(code).zfill(6)
         q = {
-            "code": str(code).zfill(6),
+            "code": code6,
             "date": {"$gte": start_s, "$lte": end_s},
         }
         rows = list(coll.find(q, proj).sort("date", 1))
         if not rows:
+            reasons[code6] = "no_rows"
             continue
         df = pd.DataFrame(rows)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).set_index("date").sort_index()
         if "close" not in df.columns:
+            reasons[code6] = "missing_close"
             continue
 
         close = pd.to_numeric(df["close"], errors="coerce").dropna()
@@ -318,6 +329,21 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
 
         need = max(ret20 + 1, volw + 1, maw + 1, 252 + 1, 60 + 1)
         if close.shape[0] < need:
+            # Window not full: still return a factor record with NaNs so the code remains
+            # score-valid, but its alpha contribution will be neutral/penalized downstream.
+            reasons[code6] = "window_not_full"
+            fac[code6] = {
+                "ret_5d": float("nan"),
+                "ret_10d": float("nan"),
+                "ret_20d": float("nan"),
+                "ma_60d": float("nan"),
+                "vol_20d": float("nan"),
+                "liq_20d": float("nan"),
+                "dist_252h": float("nan"),
+                "breakout_60": float("nan"),
+                "drawdown_60": float("nan"),
+                "downvol_20d": float("nan"),
+            }
             continue
 
         c_end = float(close.iloc[-1])
@@ -358,7 +384,7 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
             series = series.loc[series.index <= end_dt]
             liq = float(series.tail(liqw).mean()) if series.shape[0] >= 1 else 0.0
 
-        fac[str(code).zfill(6)] = {
+        fac[code6] = {
             "ret_5d": r5,
             "ret_10d": r10,
             "ret_20d": r20,
@@ -371,7 +397,8 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
             "downvol_20d": downvol_20d,
         }
 
-    return fac, liq_field
+    # Keep reasons for requested codes that were not fully ready.
+    return fac, liq_field, reasons
 
 
 # ---- baseline runner helpers (used for signal generation) ----
@@ -662,7 +689,9 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
                 factor_pack: Dict[str, Dict[str, float]] = {}
                 if score_mode == "factor":
-                    factor_pack, _liq_field = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
+                    factor_pack, _liq_field, factor_reasons = _compute_factors_for_codes(
+                        mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg
+                    )
                     r5 = {c: factor_pack[c]["ret_5d"] for c in factor_pack}
                     r10 = {c: factor_pack[c]["ret_10d"] for c in factor_pack}
                     r20 = {c: factor_pack[c]["ret_20d"] for c in factor_pack}
@@ -713,23 +742,54 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     "downvol_q": hard_downvol_q,
                 }
                 if score_mode == "factor" and factor_pack:
+                    # --- Audit breakdown counts (do not affect trading logic) ---
+                    # N3: score_valid (factors exist)
+                    valid = {c for c in candidates if c in factor_pack}
+                    hard_stats["N3_after_score_valid"] = int(len(valid))
+
+                    # top1 invalid reason (highest momentum rank among invalid)
+                    inv = [c for c in candidates if c not in factor_pack]
+                    if inv:
+                        inv_sorted = sorted(inv, key=lambda c: (mom_rank.get(c, 10**9), c))
+                        c0 = str(inv_sorted[0]).zfill(6)
+                        hard_stats["top1_invalid_reason"] = str((factor_reasons or {}).get(c0, "unknown"))
 
                     def _ok(code: str) -> bool:
                         fp = factor_pack.get(code)
+                        # If factors are missing entirely, treat as score-invalid (cannot apply hard filters).
                         if not fp:
                             return False
-                        if hard_vol_20d_max > 0 and fp.get("vol_20d", 0.0) > hard_vol_20d_max:
+                        # If vol/liq are missing (NaN), do not hard-fail eligibility.
+                        v = fp.get("vol_20d", float("nan"))
+                        l = fp.get("liq_20d", float("nan"))
+                        try:
+                            v = float(v)
+                        except Exception:
+                            v = float("nan")
+                        try:
+                            l = float(l)
+                        except Exception:
+                            l = float("nan")
+                        if hard_vol_20d_max > 0 and v == v and v > hard_vol_20d_max:
                             return False
-                        if hard_liq_20d_min > 0 and fp.get("liq_20d", 0.0) < hard_liq_20d_min:
+                        if hard_liq_20d_min > 0 and l == l and l < hard_liq_20d_min:
                             return False
                         # survival bottom-line filter (ONLY hard quality filter)
-                        if fp.get("dist_252h") is None:
-                            return False
-                        if fp.get("dist_252h", 0.0) < hard_dist_252h_min:
-                            return False
+                        # IMPORTANT: if dist_252h is not computable (e.g., window not full),
+                        # do not hard-fail eligibility here; treat as "unknown" and let it
+                        # affect alpha quality only.
+                        d = fp.get("dist_252h")
+                        try:
+                            d = float(d)
+                        except Exception:
+                            d = float("nan")
+                        if d == d:  # not NaN
+                            if d < hard_dist_252h_min:
+                                return False
                         return True
 
                     candidates = {c for c in candidates if _ok(c)}
+                    hard_stats["N1_after_dist"] = int(len(candidates))
 
                     # downside-vol quantile hard filter (conditional)
                     if candidates and 0.0 < hard_downvol_q < 1.0:
@@ -744,6 +804,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                             hard_stats["downvol_thr"] = thr
                             candidates = {c for c in candidates if float(factor_pack[c].get("downvol_20d", 0.0)) <= thr}
 
+                    hard_stats["N2_after_downvol_hard"] = int(len(candidates))
                     hard_stats["after"] = len(candidates)
 
                 hard_filter_stats.append({"tranche": t, **hard_stats})
@@ -987,7 +1048,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         zfactors = None
         liq_field_detected = None
         if score_mode == "factor" and final_port:
-            factors, liq_field_detected = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+            factors, liq_field_detected, _final_factor_reasons = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
             r5 = {c: factors[c]["ret_5d"] for c in factors}
             r10 = {c: factors[c]["ret_10d"] for c in factors}
             r20 = {c: factors[c]["ret_20d"] for c in factors}
@@ -1019,6 +1080,24 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         # and route it to the fallback asset (L3).
         if min_weight and min_weight > 0:
             final_port = {c: w for c, w in final_port.items() if float(w) >= float(min_weight)}
+
+        # Hard protection: disallow inconsistent state where we have positive weight budget
+        # but end up with zero effective positions after min_weight. In that case, force
+        # the sleeve to cash (nofb) or full fallback (fb).
+        s_stock = sum(max(0.0, float(w)) for w in final_port.values())
+        if len(final_port) == 0 and s_stock > 1e-12:
+            # This should be impossible, but guard anyway.
+            final_port = {}
+
+        if len(final_port) == 0:
+            if not disable_fallback:
+                fallback_level = "L3"
+                fallback_trigger_reason = "empty_after_min_weight"
+                final_port[fallback_asset] = 1.0
+                final_scores[fallback_asset] = 0.0
+            else:
+                # no positions; remaining sleeve is cash
+                fallback_trigger_reason = "empty_after_min_weight_nofb"
 
         # Fallback ladder (L3): if after L2 we still have too few names, park remaining weight in a substitute asset.
         eff_n = len(final_port)
