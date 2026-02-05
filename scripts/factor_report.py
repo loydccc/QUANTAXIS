@@ -235,6 +235,11 @@ def add_factors(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_20d"] = ret.rolling(20).std().reset_index(level=0, drop=True)
     df["liq_20d"] = g["liq"].rolling(20).mean().reset_index(level=0, drop=True)
 
+    # transformed factors (so we can quickly test "flip" hypotheses)
+    df["rev_10d"] = -df["ret_10d"]
+    df["rev_20d"] = -df["ret_20d"]
+    df["low_vol_20d"] = -df["vol_20d"]
+
     return df
 
 
@@ -549,6 +554,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--liq-window", type=int, default=20)
     ap.add_argument("--liq-min-ratio", type=float, default=1.0)
     ap.add_argument("--max-codes", type=int, default=0, help="0 = all")
+    ap.add_argument(
+        "--factors",
+        default="ret_10d,ret_20d,vol_20d,liq_20d",
+        help="Comma-separated factor columns to evaluate. Available: ret_10d, ret_20d, vol_20d, liq_20d, rev_10d, rev_20d, low_vol_20d",
+    )
     ap.add_argument("--winsor-pct", type=float, default=0.01, help="Cross-sectional winsorize percent per tail (0=disable)")
     ap.add_argument("--zscore", type=int, default=1, help="1=apply cross-sectional z-score per date")
     ap.add_argument("--industry-neutral", type=int, default=0, help="1=industry demean per date (requires stock_list.industry)")
@@ -607,7 +617,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     df = add_factors(df)
     df = add_forward_returns(df, horizons)
 
-    raw_factors = ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]
+    requested = [s.strip() for s in str(args.factors).split(",") if s.strip()]
+    if not requested:
+        requested = ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]
+
+    available = {"ret_10d", "ret_20d", "vol_20d", "liq_20d", "rev_10d", "rev_20d", "low_vol_20d"}
+    bad = [x for x in requested if x not in available]
+    if bad:
+        raise SystemExit(f"unknown factors in --factors: {bad}; available={sorted(list(available))}")
+
+    raw_factors = requested
     targets = [f"fwd_{h}d" for h in horizons]
 
     # standard pipeline: winsorize -> zscore -> optional industry neutral

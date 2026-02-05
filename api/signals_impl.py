@@ -32,14 +32,20 @@ from api.state import job_sem
 
 # --- Factor score config (versioned in signal meta) ---
 FAC_WINDOWS = {
+    "ret_5d": int(os.getenv("QUANTAXIS_FAC_RET_5D", "5")),
     "ret_10d": int(os.getenv("QUANTAXIS_FAC_RET_10D", "10")),
     "ret_20d": int(os.getenv("QUANTAXIS_FAC_RET_20D", "20")),
+    "ma_60d": int(os.getenv("QUANTAXIS_FAC_MA_60D", "60")),
     "vol_20d": int(os.getenv("QUANTAXIS_FAC_VOL_20D", "20")),
     "liq_20d": int(os.getenv("QUANTAXIS_FAC_LIQ_20D", "20")),
 }
 FAC_WEIGHTS = {
+    # Default weights remain momentum-ish; we override per request cfg.
     "ret_20d": float(os.getenv("QUANTAXIS_SCORE_W_RET_20D", "1.0")),
     "ret_10d": float(os.getenv("QUANTAXIS_SCORE_W_RET_10D", "0.5")),
+    "ret_5d": float(os.getenv("QUANTAXIS_SCORE_W_RET_5D", "0.2")),
+    # ma_60d is a trend/quality proxy: (close/MA60 - 1). Positive means above trend.
+    "ma_60d": float(os.getenv("QUANTAXIS_SCORE_W_MA_60D", "0.2")),
     "vol_20d": float(os.getenv("QUANTAXIS_SCORE_W_VOL_20D", "-0.5")),
     "liq_20d": float(os.getenv("QUANTAXIS_SCORE_W_LIQ_20D", "0.2")),
 }
@@ -47,6 +53,20 @@ FAC_WEIGHTS = {
 # --- Hard threshold filters (tradability/risk) ---
 HARD_VOL_20D_MAX = float(os.getenv("QUANTAXIS_HARD_VOL_20D_MAX", "0"))
 HARD_LIQ_20D_MIN = float(os.getenv("QUANTAXIS_HARD_LIQ_20D_MIN", "0"))
+
+# --- Hard quality/shape filters (stability) ---
+HARD_DIST_252H_MIN = float(os.getenv("QUANTAXIS_HARD_DIST_252H_MIN", "-0.4"))
+HARD_BREAKOUT_60_MIN = float(os.getenv("QUANTAXIS_HARD_BREAKOUT_60_MIN", "-0.02"))
+HARD_DRAWDOWN_60_MIN = float(os.getenv("QUANTAXIS_HARD_DRAWDOWN_60_MIN", "-0.30"))
+HARD_DOWNVOL_Q = float(os.getenv("QUANTAXIS_HARD_DOWNVOL_Q", "0.70"))  # keep <= q-quantile
+
+# --- Ladder fixed params (risk budget; do not tweak dynamically) ---
+MIN_POS = 6
+N_GUARD = 12
+DOWNVOL_Q = 0.70
+S_STRUCT_FLOOR_L1 = 0.25
+W_CAP_MULT_L2 = 0.5
+FALLBACK_ASSET_DEFAULT = "510300"
 
 # Job timeouts/log tail
 API_JOB_TIMEOUT_SEC = int(os.getenv("QUANTAXIS_API_JOB_TIMEOUT_SEC", "3600"))
@@ -71,6 +91,7 @@ def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     liq_min_ratio = cfg.get("liq_min_ratio", 1.0)
     ma_mode = cfg.get("ma_mode", "filter")
     score_mode = cfg.get("score_mode", "baseline")
+    min_weight = float(cfg.get("min_weight", 0.0))
 
     # Execution realism (optional)
     execution_mode = str(cfg.get("execution_mode", "naive"))  # naive|realistic
@@ -109,6 +130,9 @@ def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     if score_mode not in {"baseline", "factor"}:
         raise HTTPException(status_code=400, detail="bad score_mode (baseline|factor)")
 
+    if not (0.0 <= float(min_weight) <= 1.0):
+        raise HTTPException(status_code=400, detail="bad min_weight (0..1)")
+
     if execution_mode not in {"naive", "realistic"}:
         raise HTTPException(status_code=400, detail="bad execution_mode (naive|realistic)")
     if not isinstance(backup_k, int) or backup_k < 0 or backup_k > 500:
@@ -138,12 +162,16 @@ def _write_factors_csv(path: Path, positions: list[dict]) -> None:
         "weight",
         "rank",
         "score",
+        "fac_ret_5d",
         "fac_ret_10d",
         "fac_ret_20d",
+        "fac_ma_60d",
         "fac_vol_20d",
         "fac_liq_20d",
+        "z_ret_5d",
         "z_ret_10d",
         "z_ret_20d",
+        "z_ma_60d",
         "z_vol_20d",
         "z_liq_20d",
     ]
@@ -179,9 +207,9 @@ def _portfolio_to_positions(
     for i, (c, w) in enumerate(items, start=1):
         row = {"code": c, "weight": round(w, 10), "rank": i, "score": round((scores or {}).get(c, 0.0), 6)}
         if factors and c in factors:
-            row.update({f"fac_{k}": factors[c].get(k) for k in ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]})
+            row.update({f"fac_{k}": factors[c].get(k) for k in ["ret_5d", "ret_10d", "ret_20d", "ma_60d", "vol_20d", "liq_20d"]})
         if zfactors and c in zfactors:
-            row.update({f"z_{k}": round(zfactors[c].get(k, 0.0), 6) for k in ["ret_10d", "ret_20d", "vol_20d", "liq_20d"]})
+            row.update({f"z_{k}": round(zfactors[c].get(k, 0.0), 6) for k in ["ret_5d", "ret_10d", "ret_20d", "ma_60d", "vol_20d", "liq_20d"]})
         out.append(row)
     return out
 
@@ -243,15 +271,19 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
                 liq_field = k
                 break
 
+    ret5 = int(cfg.get("fac_ret_5d", FAC_WINDOWS["ret_5d"]))
     ret10 = int(cfg.get("fac_ret_10d", FAC_WINDOWS["ret_10d"]))
     ret20 = int(cfg.get("fac_ret_20d", FAC_WINDOWS["ret_20d"]))
+    maw = int(cfg.get("fac_ma_60d", FAC_WINDOWS["ma_60d"]))
     volw = int(cfg.get("fac_vol_20d", FAC_WINDOWS["vol_20d"]))
     liqw = int(cfg.get("fac_liq_20d", FAC_WINDOWS["liq_20d"]))
 
     end_dt = pd.to_datetime(as_of_date)
-    start_dt = end_dt - pd.Timedelta(days=120)
+    # Need enough history for 252d high + 60d breakout/drawdown + vol + MA.
+    # Use calendar days buffer (trading days < calendar days).
+    start_dt = end_dt - pd.Timedelta(days=520)
 
-    proj = {"_id": 0, "date": 1, "close": 1}
+    proj = {"_id": 0, "date": 1, "close": 1, "high": 1, "low": 1}
     if liq_field:
         proj[liq_field] = 1
 
@@ -273,16 +305,52 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
         df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).set_index("date").sort_index()
         if "close" not in df.columns:
             continue
+
         close = pd.to_numeric(df["close"], errors="coerce").dropna()
         close = close.loc[close.index <= end_dt]
-        if close.shape[0] < max(ret20 + 1, volw + 1):
+
+        high = pd.to_numeric(df.get("high"), errors="coerce")
+        low = pd.to_numeric(df.get("low"), errors="coerce")
+        if high is not None:
+            high = high.loc[high.index <= end_dt]
+        if low is not None:
+            low = low.loc[low.index <= end_dt]
+
+        need = max(ret20 + 1, volw + 1, maw + 1, 252 + 1, 60 + 1)
+        if close.shape[0] < need:
             continue
 
         c_end = float(close.iloc[-1])
+        r5 = float(c_end / float(close.iloc[-1 - ret5]) - 1.0) if close.shape[0] > ret5 else 0.0
         r10 = float(c_end / float(close.iloc[-1 - ret10]) - 1.0) if close.shape[0] > ret10 else 0.0
         r20 = float(c_end / float(close.iloc[-1 - ret20]) - 1.0) if close.shape[0] > ret20 else 0.0
+
+        # trend proxy: close / MA(maw) - 1
+        ma60 = float(close.tail(maw).mean()) if close.shape[0] >= maw else float(close.mean())
+        ma_dist = float(c_end / ma60 - 1.0) if ma60 else 0.0
+
+        # 52w high distance (quality bottom-line filter)
+        # Use HIGH when available; fallback to close.
+        hh = high.dropna() if high is not None else close
+        if hh is None or hh.dropna().shape[0] < 252:
+            dist_252h = float("nan")
+        else:
+            hi_252 = float(hh.tail(252).max())
+            dist_252h = float(c_end / hi_252 - 1.0) if hi_252 else float("nan")
+
+        # breakout/drawdown structure
+        h60 = (high.dropna() if high is not None else close).tail(60)
+        c60 = close.tail(60)
+        breakout_60 = float(c_end / float(h60.max()) - 1.0) if h60.shape[0] >= 20 and float(h60.max()) else float("nan")
+        drawdown_60 = float(c_end / float(c60.max()) - 1.0) if c60.shape[0] >= 20 and float(c60.max()) else float("nan")
+
         ret = close.pct_change().dropna()
         v20 = float(ret.tail(volw).std()) if ret.shape[0] >= volw else float(ret.std())
+
+        # downside vol: std of negative daily returns (last volw days)
+        tail = ret.tail(volw)
+        neg = tail[tail < 0]
+        downvol_20d = float(neg.std()) if neg.shape[0] >= 5 else float(tail.std())
 
         liq = 0.0
         if liq_field and liq_field in df.columns:
@@ -290,7 +358,18 @@ def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str,
             series = series.loc[series.index <= end_dt]
             liq = float(series.tail(liqw).mean()) if series.shape[0] >= 1 else 0.0
 
-        fac[str(code).zfill(6)] = {"ret_10d": r10, "ret_20d": r20, "vol_20d": v20, "liq_20d": liq}
+        fac[str(code).zfill(6)] = {
+            "ret_5d": r5,
+            "ret_10d": r10,
+            "ret_20d": r20,
+            "ma_60d": ma_dist,
+            "vol_20d": v20,
+            "liq_20d": liq,
+            "dist_252h": dist_252h,
+            "breakout_60": breakout_60,
+            "drawdown_60": drawdown_60,
+            "downvol_20d": downvol_20d,
+        }
 
     return fac, liq_field
 
@@ -492,6 +571,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     liq_min_ratio = float(cfg.get("liq_min_ratio", 1.0))
     ma_mode = str(cfg.get("ma_mode", "filter"))
     score_mode = str(cfg.get("score_mode", "baseline"))
+    min_weight = float(cfg.get("min_weight", 0.0))
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
 
@@ -508,6 +588,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
     hard_vol_20d_max = float(cfg.get("hard_vol_20d_max", HARD_VOL_20D_MAX))
     hard_liq_20d_min = float(cfg.get("hard_liq_20d_min", HARD_LIQ_20D_MIN))
+
+    # quality/shape filters (dist stays hard; breakout/drawdown become gating)
+    hard_dist_252h_min = float(cfg.get("hard_dist_252h_min", HARD_DIST_252H_MIN))
+    hard_breakout_60_min = float(cfg.get("hard_breakout_60_min", HARD_BREAKOUT_60_MIN))
+    hard_drawdown_60_min = float(cfg.get("hard_drawdown_60_min", HARD_DRAWDOWN_60_MIN))
+    hard_downvol_q = float(cfg.get("hard_downvol_q", HARD_DOWNVOL_Q))
+
+    # Fallback ladder + substitute asset (L3 only)
+    fallback_asset = str(cfg.get("fallback_asset", FALLBACK_ASSET_DEFAULT))
 
     try:
         if strategy != "hybrid_baseline_weekly_topk":
@@ -530,184 +619,339 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         mom_tr = _extract_last_tranches_from_positions_csv(mom_dir / "positions.csv", n=max(hold_weeks, 1))
         ma_tr = _extract_last_tranches_from_positions_csv(ma_dir / "positions.csv", n=max(hold_weeks, 1))
 
+        # Ladder execution (strict order): L0 -> L1 -> L2 -> L3
+        ladder_runs = []
+        fallback_level = "L0"
+        fallback_trigger_reason = None
+
+        n_tr = 1 if not tranche_overlap or hold_weeks <= 1 else min(2, hold_weeks)
+        scale = 1.0 / n_tr
+
         tranche_objs = []
         hard_filter_stats = []
         final_port: Dict[str, float] = {}
         final_scores: Dict[str, float] = {}
 
-        n_tr = 1 if not tranche_overlap or hold_weeks <= 1 else min(2, hold_weeks)
-        scale = 1.0 / n_tr
+        for ladder_level in ["L0", "L1", "L2"]:
+            fallback_level = ladder_level
+            tranche_objs = []
+            hard_filter_stats = []
+            final_port = {}
+            final_scores = {}
 
-        for t in range(n_tr):
-            mom_w = mom_tr[t]["weights"] if t < len(mom_tr) else {}
-            ma_w = ma_tr[t]["weights"] if t < len(ma_tr) else {}
+            for t in range(n_tr):
+                mom_w = mom_tr[t]["weights"] if t < len(mom_tr) else {}
+                ma_w = ma_tr[t]["weights"] if t < len(ma_tr) else {}
 
-            mom_sorted = sorted(mom_w.items(), key=lambda x: (-x[1], x[0]))
-            cand_k = int(cfg.get("candidate_k", (top_k * 5 if score_mode == "factor" else top_k)))
-            cand_k = max(top_k, min(500, cand_k))
-            mom_top = [c for c, _w in mom_sorted][:cand_k]
-            ma_set = set([c for c, w in ma_w.items() if w > 0])
+                mom_sorted = sorted(mom_w.items(), key=lambda x: (-x[1], x[0]))
+                cand_k = int(cfg.get("candidate_k", (top_k * 5 if score_mode == "factor" else top_k)))
+                cand_k = max(top_k, min(500, cand_k))
+                mom_top = [c for c, _w in mom_sorted][:cand_k]
+                ma_set = set([c for c, w in ma_w.items() if w > 0])
 
-            scores: Dict[str, float] = {}
-            mom_rank: Dict[str, int] = {}
-            for i, code in enumerate(mom_top, start=1):
-                mom_rank[code] = i
-                scores[code] = float(top_k - i + 1)
-            if ma_mode == "boost":
-                for code in ma_set:
-                    scores[code] = scores.get(code, 0.0) + 1.0
+                scores: Dict[str, float] = {}
+                mom_rank: Dict[str, int] = {}
+                for i, code in enumerate(mom_top, start=1):
+                    mom_rank[code] = i
+                    scores[code] = float(top_k - i + 1)
+                if ma_mode == "boost":
+                    for code in ma_set:
+                        scores[code] = scores.get(code, 0.0) + 1.0
 
-            factor_pack: Dict[str, Dict[str, float]] = {}
-            if score_mode == "factor":
-                factor_pack, _liq_field = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
-                r10 = {c: factor_pack[c]["ret_10d"] for c in factor_pack}
-                r20 = {c: factor_pack[c]["ret_20d"] for c in factor_pack}
-                v20 = {c: factor_pack[c]["vol_20d"] for c in factor_pack}
-                liq = {c: factor_pack[c]["liq_20d"] for c in factor_pack}
-                zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
-                w = {
-                    "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
-                    "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
-                    "vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
-                    "liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
-                }
-                for c in factor_pack:
-                    scores[c] = (
-                        w["ret_20d"] * zr20.get(c, 0.0)
-                        + w["ret_10d"] * zr10.get(c, 0.0)
-                        + w["vol_20d"] * zv20.get(c, 0.0)
-                        + w["liq_20d"] * zliq.get(c, 0.0)
+                factor_pack: Dict[str, Dict[str, float]] = {}
+                if score_mode == "factor":
+                    factor_pack, _liq_field = _compute_factors_for_codes(mom_tr[t]["rebalance_date"], list(set(mom_top) | ma_set), cfg)
+                    r5 = {c: factor_pack[c]["ret_5d"] for c in factor_pack}
+                    r10 = {c: factor_pack[c]["ret_10d"] for c in factor_pack}
+                    r20 = {c: factor_pack[c]["ret_20d"] for c in factor_pack}
+                    ma60 = {c: factor_pack[c]["ma_60d"] for c in factor_pack}
+                    v20 = {c: factor_pack[c]["vol_20d"] for c in factor_pack}
+                    liq = {c: factor_pack[c]["liq_20d"] for c in factor_pack}
+                    zr5, zr10, zr20, zma60, zv20, zliq = (
+                        _zscore(r5),
+                        _zscore(r10),
+                        _zscore(r20),
+                        _zscore(ma60),
+                        _zscore(v20),
+                        _zscore(liq),
                     )
+                    w = {
+                        "ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
+                        "ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
+                        "ret_5d": float(cfg.get("score_w_ret_5d", FAC_WEIGHTS["ret_5d"])),
+                        "ma_60d": float(cfg.get("score_w_ma_60d", FAC_WEIGHTS["ma_60d"])),
+                        "vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
+                        "liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
+                    }
+                    for c in factor_pack:
+                        scores[c] = (
+                            w["ret_20d"] * zr20.get(c, 0.0)
+                            + w["ret_10d"] * zr10.get(c, 0.0)
+                            + w["ret_5d"] * zr5.get(c, 0.0)
+                            + w["ma_60d"] * zma60.get(c, 0.0)
+                            + w["vol_20d"] * zv20.get(c, 0.0)
+                            + w["liq_20d"] * zliq.get(c, 0.0)
+                        )
 
-            if ma_mode == "filter":
-                candidates = set(mom_top) & ma_set
-                if len(candidates) < max(3, min(5, top_k)):
-                    candidates = set(ma_set)
-            else:
-                candidates = set(mom_top) | ma_set
+                if ma_mode == "filter":
+                    candidates = set(mom_top) & ma_set
+                    if len(candidates) < max(3, min(5, top_k)):
+                        candidates = set(ma_set)
+                else:
+                    candidates = set(mom_top) | ma_set
 
-            hard_stats = {"before": len(candidates), "after": len(candidates), "vol_20d_max": hard_vol_20d_max, "liq_20d_min": hard_liq_20d_min}
-            if score_mode == "factor" and factor_pack and (hard_vol_20d_max > 0 or hard_liq_20d_min > 0):
+                hard_stats = {
+                    "before": len(candidates),
+                    "after": len(candidates),
+                    "vol_20d_max": hard_vol_20d_max,
+                    "liq_20d_min": hard_liq_20d_min,
+                    "dist_252h_min": hard_dist_252h_min,
+                    "breakout_60_min": hard_breakout_60_min,
+                    "drawdown_60_min": hard_drawdown_60_min,
+                    "downvol_q": hard_downvol_q,
+                }
+                if score_mode == "factor" and factor_pack:
 
-                def _ok(code: str) -> bool:
-                    fp = factor_pack.get(code)
-                    if not fp:
-                        return False
-                    if hard_vol_20d_max > 0 and fp.get("vol_20d", 0.0) > hard_vol_20d_max:
-                        return False
-                    if hard_liq_20d_min > 0 and fp.get("liq_20d", 0.0) < hard_liq_20d_min:
-                        return False
-                    return True
+                    def _ok(code: str) -> bool:
+                        fp = factor_pack.get(code)
+                        if not fp:
+                            return False
+                        if hard_vol_20d_max > 0 and fp.get("vol_20d", 0.0) > hard_vol_20d_max:
+                            return False
+                        if hard_liq_20d_min > 0 and fp.get("liq_20d", 0.0) < hard_liq_20d_min:
+                            return False
+                        # survival bottom-line filter (ONLY hard quality filter)
+                        if fp.get("dist_252h") is None:
+                            return False
+                        if fp.get("dist_252h", 0.0) < hard_dist_252h_min:
+                            return False
+                        return True
 
-                candidates = {c for c in candidates if _ok(c)}
-                hard_stats["after"] = len(candidates)
+                    candidates = {c for c in candidates if _ok(c)}
 
-            hard_filter_stats.append({"tranche": t, **hard_stats})
+                    # downside-vol quantile hard filter (conditional)
+                    if candidates and 0.0 < hard_downvol_q < 1.0:
+                        dvs = [float(factor_pack[c].get("downvol_20d", 0.0)) for c in candidates if c in factor_pack]
+                        dvs = [x for x in dvs if x == x]  # drop NaN
+                        # Only apply hard cut when pool is large enough (avoid emptying)
+                        # and only at L0 (L1 disables hard downvol cut).
+                        if ladder_level == "L0" and len(dvs) >= N_GUARD:
+                            dvs.sort()
+                            idx = int(round((len(dvs) - 1) * hard_downvol_q))
+                            thr = float(dvs[idx])
+                            hard_stats["downvol_thr"] = thr
+                            candidates = {c for c in candidates if float(factor_pack[c].get("downvol_20d", 0.0)) <= thr}
 
-            def sort_key(code: str):
-                return (-scores.get(code, 0.0), mom_rank.get(code, 10**9), code)
+                    hard_stats["after"] = len(candidates)
 
-            ranked = sorted(candidates, key=sort_key)
-            picks = ranked[:top_k]
-            backups = ranked[top_k : top_k + max(0, backup_k)]
+                hard_filter_stats.append({"tranche": t, **hard_stats})
 
-            # Execution realism (BUY-side): block new buys at up-limit and fill with backups
-            if execution_mode == "realistic" and backups:
-                prev_set = set()
-                if t - 1 >= 0 and t - 1 < len(tranche_objs):
-                    prev_set = set(tranche_objs[t - 1].get("picks") or [])
+                # Structure gating (soft): do not kill candidates; just downweight score.
+                # breakout score S_b
+                def _sb(x: float) -> float:
+                    if x is None or x != x:
+                        return 0.2
+                    if x >= -0.02:
+                        return 1.0
+                    if x < -0.08:
+                        return 0.2
+                    # linear from 0.4..1.0 over [-0.08, -0.02)
+                    return 0.4 + (x - (-0.08)) * (1.0 - 0.4) / ((-0.02) - (-0.08))
 
-                blocked_buys = set()
-                asof = pd.to_datetime(mom_tr[t]["rebalance_date"]) if t < len(mom_tr) else pd.to_datetime(mom_date)
+                # drawdown score S_d
+                def _sd(x: float) -> float:
+                    if x is None or x != x:
+                        return 0.1
+                    if x >= -0.30:
+                        return 1.0
+                    if x < -0.45:
+                        return 0.1
+                    # linear from 0.3..1.0 over [-0.45, -0.30)
+                    return 0.3 + (x - (-0.45)) * (1.0 - 0.3) / ((-0.30) - (-0.45))
 
-                # connect mongo
-                import pymongo
+                # Downvol penalty (always available; hard cut already applied conditionally)
+                downvol_rank = {}
+                if score_mode == "factor" and factor_pack and candidates:
+                    dvs = [(c, float(factor_pack.get(c, {}).get("downvol_20d", 0.0))) for c in candidates]
+                    dvs = [(c, v) for c, v in dvs if v == v]
+                    dvs.sort(key=lambda x: x[1])  # low risk first
+                    n = len(dvs)
+                    for i, (c, _v) in enumerate(dvs):
+                        downvol_rank[c] = (i / max(1, n - 1))  # 0..1
 
-                host = os.getenv("MONGODB_HOST", os.getenv("MONGO_HOST", "mongodb"))
-                port = int(os.getenv("MONGODB_PORT", os.getenv("MONGO_PORT", "27017")))
-                dbn = os.getenv("MONGODB_DATABASE", os.getenv("MONGO_DATABASE", "quantaxis"))
-                user = os.getenv("MONGODB_USER", os.getenv("MONGO_USER", "quantaxis"))
-                password = os.getenv("MONGODB_PASSWORD", os.getenv("MONGO_PASSWORD", "quantaxis"))
-                root_user = os.getenv("MONGO_ROOT_USER", "root")
-                root_password = os.getenv("MONGO_ROOT_PASSWORD", "root")
+                def gated_score(code: str) -> float:
+                    sc = float(scores.get(code, 0.0))
+                    if score_mode != "factor" or not factor_pack:
+                        return sc
+                    fp = factor_pack.get(code) or {}
+                    sb = _sb(float(fp.get("breakout_60", float('nan'))))
+                    sd = _sd(float(fp.get("drawdown_60", float('nan'))))
+                    s_struct = sb * sd
+                    if ladder_level == "L1":
+                        s_struct = max(s_struct, float(S_STRUCT_FLOOR_L1))
 
-                uris = [
-                    f"mongodb://{user}:{password}@{host}:{port}/{dbn}?authSource=admin",
-                    f"mongodb://{root_user}:{root_password}@{host}:{port}/{dbn}?authSource=admin",
-                    f"mongodb://{host}:{port}/{dbn}",
-                ]
-                client = None
-                for uri in uris:
-                    try:
-                        c = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
-                        c.admin.command("ping")
-                        client = c
-                        break
-                    except Exception:
-                        pass
+                    # downvol penalty: 1 - rank_pct(downvol)
+                    s_down = 1.0 - float(downvol_rank.get(code, 0.5))
 
-                if client is not None:
-                    coll = client[dbn]["stock_day"]
-                    buy_list = [c for c in picks if c not in prev_set]
-                    if buy_list:
-                        end = asof
-                        start = asof - pd.Timedelta(days=10)
-                        start_s = str(start.date())
-                        end_s = str(end.date())
-                        start2 = start.strftime("%Y%m%d")
-                        end2 = end.strftime("%Y%m%d")
+                    if ladder_level == "L2":
+                        # Structure affects sorting only (not multiplicative).
+                        return sc * s_down
 
-                        for code in buy_list:
-                            code6 = str(code).zfill(6)
-                            q = {
-                                "code": code6,
-                                "$or": [
-                                    {"date": {"$gte": start_s, "$lte": end_s}},
-                                    {"date": {"$gte": start2, "$lte": end2}},
-                                ],
-                            }
-                            rows = list(coll.find(q, {"_id": 0, "date": 1, "high": 1, "close": 1}).sort("date", 1))
-                            if len(rows) < 2:
-                                continue
-                            df = pd.DataFrame(rows)
-                            df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed", errors="coerce")
-                            df = df.dropna(subset=["date"]).sort_values("date")
-                            df = df[df["date"] <= asof]
-                            if df.shape[0] < 2:
-                                continue
-                            today = df.iloc[-1]
-                            prev = df.iloc[-2]
-                            pc = float(prev.get("close", 0.0) or 0.0)
-                            hh = float(today.get("high", 0.0) or 0.0)
-                            cc = float(today.get("close", 0.0) or 0.0)
+                    return sc * s_struct * s_down
 
-                            lp = _limit_pct_for(code6, base=limit_pct, tiering=limit_tiering)
-                            up_lim = pc * (1.0 + lp)
-                            if limit_touch_mode == "hl":
-                                touch_up = hh >= up_lim and _near_bps(hh, up_lim, limit_price_eps_bps)
-                            else:
-                                touch_up = abs(cc - hh) <= float(limit_touch_eps) and _near_bps(cc, up_lim, limit_price_eps_bps)
-                            if touch_up:
-                                blocked_buys.add(code)
+                def sort_key(code: str):
+                    if ladder_level == "L2" and score_mode == "factor" and factor_pack:
+                        fp = factor_pack.get(code) or {}
+                        sb = _sb(float(fp.get("breakout_60", float('nan'))))
+                        sd = _sd(float(fp.get("drawdown_60", float('nan'))))
+                        s_struct = sb * sd
+                        # Primary: gated_score (no struct), Secondary: struct
+                        return (-gated_score(code), -s_struct, mom_rank.get(code, 10**9), code)
+                    return (-gated_score(code), mom_rank.get(code, 10**9), code)
 
-                if blocked_buys:
-                    keep = [c for c in picks if c not in blocked_buys]
-                    held = set(prev_set) | set(keep)
-                    add = []
-                    for c in backups:
-                        if c not in held:
-                            add.append(c)
-                        if len(add) >= len(blocked_buys):
+                ranked = sorted(candidates, key=sort_key)
+                picks = ranked[:top_k]
+                backups = ranked[top_k : top_k + max(0, backup_k)]
+
+                # Execution realism (BUY-side): block new buys at up-limit and fill with backups
+                if execution_mode == "realistic" and backups:
+                    prev_set = set()
+                    if t - 1 >= 0 and t - 1 < len(tranche_objs):
+                        prev_set = set(tranche_objs[t - 1].get("picks") or [])
+
+                    blocked_buys = set()
+                    asof = pd.to_datetime(mom_tr[t]["rebalance_date"]) if t < len(mom_tr) else pd.to_datetime(mom_date)
+
+                    # connect mongo
+                    import pymongo
+
+                    host = os.getenv("MONGODB_HOST", os.getenv("MONGO_HOST", "mongodb"))
+                    port = int(os.getenv("MONGODB_PORT", os.getenv("MONGO_PORT", "27017")))
+                    dbn = os.getenv("MONGODB_DATABASE", os.getenv("MONGO_DATABASE", "quantaxis"))
+                    user = os.getenv("MONGODB_USER", os.getenv("MONGO_USER", "quantaxis"))
+                    password = os.getenv("MONGODB_PASSWORD", os.getenv("MONGO_PASSWORD", "quantaxis"))
+                    root_user = os.getenv("MONGO_ROOT_USER", "root")
+                    root_password = os.getenv("MONGO_ROOT_PASSWORD", "root")
+
+                    uris = [
+                        f"mongodb://{user}:{password}@{host}:{port}/{dbn}?authSource=admin",
+                        f"mongodb://{root_user}:{root_password}@{host}:{port}/{dbn}?authSource=admin",
+                        f"mongodb://{host}:{port}/{dbn}",
+                    ]
+                    client = None
+                    for uri in uris:
+                        try:
+                            c = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+                            c.admin.command("ping")
+                            client = c
                             break
-                    picks = keep + add
+                        except Exception:
+                            pass
 
-            tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
+                    if client is not None:
+                        coll = client[dbn]["stock_day"]
+                        buy_list = [c for c in picks if c not in prev_set]
+                        if buy_list:
+                            end = asof
+                            start = asof - pd.Timedelta(days=10)
+                            start_s = str(start.date())
+                            end_s = str(end.date())
+                            start2 = start.strftime("%Y%m%d")
+                            end2 = end.strftime("%Y%m%d")
 
-            for c, w in tranche_port.items():
-                final_port[c] = final_port.get(c, 0.0) + scale * w
-                final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
+                            for code in buy_list:
+                                code6 = str(code).zfill(6)
+                                q = {
+                                    "code": code6,
+                                    "$or": [
+                                        {"date": {"$gte": start_s, "$lte": end_s}},
+                                        {"date": {"$gte": start2, "$lte": end2}},
+                                    ],
+                                }
+                                rows = list(coll.find(q, {"_id": 0, "date": 1, "high": 1, "close": 1}).sort("date", 1))
+                                if len(rows) < 2:
+                                    continue
+                                df = pd.DataFrame(rows)
+                                df["date"] = pd.to_datetime(df["date"].astype(str), format="mixed", errors="coerce")
+                                df = df.dropna(subset=["date"]).sort_values("date")
+                                df = df[df["date"] <= asof]
+                                if df.shape[0] < 2:
+                                    continue
+                                today = df.iloc[-1]
+                                prev = df.iloc[-2]
+                                pc = float(prev.get("close", 0.0) or 0.0)
+                                hh = float(today.get("high", 0.0) or 0.0)
+                                cc = float(today.get("close", 0.0) or 0.0)
 
-            tranche_objs.append({"rebalance_date": mom_tr[t]["rebalance_date"], "effective_date": mom_tr[t]["effective_date"], "picks": picks})
+                                lp = _limit_pct_for(code6, base=limit_pct, tiering=limit_tiering)
+                                up_lim = pc * (1.0 + lp)
+                                if limit_touch_mode == "hl":
+                                    touch_up = hh >= up_lim and _near_bps(hh, up_lim, limit_price_eps_bps)
+                                else:
+                                    touch_up = abs(cc - hh) <= float(limit_touch_eps) and _near_bps(cc, up_lim, limit_price_eps_bps)
+                                if touch_up:
+                                    blocked_buys.add(code)
+
+                    if blocked_buys:
+                        keep = [c for c in picks if c not in blocked_buys]
+                        held = set(prev_set) | set(keep)
+                        add = []
+                        for c in backups:
+                            if c not in held:
+                                add.append(c)
+                            if len(add) >= len(blocked_buys):
+                                break
+                        picks = keep + add
+
+                tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
+
+                for c, w in tranche_port.items():
+                    final_port[c] = final_port.get(c, 0.0) + scale * w
+                    final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
+
+                tranche_objs.append({"rebalance_date": mom_tr[t]["rebalance_date"], "effective_date": mom_tr[t]["effective_date"], "picks": picks})
+
+            # --- Ladder evaluation (use effective positions after min_weight) ---
+            eff_port = dict(final_port)
+            if min_weight and min_weight > 0:
+                eff_port = {c: w for c, w in eff_port.items() if float(w) >= float(min_weight)}
+
+            # L2: risk downtier (cap single-name max weight)
+            cap_stats = None
+            if ladder_level == "L2" and eff_port:
+                cap = (1.0 / float(top_k)) * float(W_CAP_MULT_L2)
+                # clip
+                clipped = {c: min(float(w), cap) for c, w in eff_port.items()}
+                s_clip = sum(clipped.values())
+                # redistribute remaining weight to under-cap names proportionally
+                if s_clip > 0 and s_clip < 1.0:
+                    under = {c: w for c, w in clipped.items() if w < cap - 1e-12}
+                    if under:
+                        s_under = sum(under.values())
+                        add = 1.0 - s_clip
+                        for c in list(under.keys()):
+                            clipped[c] = clipped[c] + add * (under[c] / s_under if s_under > 0 else 1.0 / len(under))
+                # renormalize
+                s2 = sum(max(0.0, float(w)) for w in clipped.values())
+                eff_port = {c: float(w) / s2 for c, w in clipped.items()} if s2 > 0 else {}
+                cap_stats = {"cap": cap, "n": len(eff_port)}
+
+            eff_n = len(eff_port)
+            ladder_runs.append(
+                {
+                    "level": ladder_level,
+                    "effective_positions": eff_n,
+                    "min_weight": min_weight,
+                    "downvol_mode": "hard+penalty" if ladder_level == "L0" else ("penalty_only" if ladder_level == "L1" else "penalty_only"),
+                    "s_struct_floor": float(S_STRUCT_FLOOR_L1) if ladder_level == "L1" else None,
+                    "l2_cap": cap_stats,
+                    "hard_filter_stats": hard_filter_stats,
+                }
+            )
+
+            if eff_n >= MIN_POS:
+                fallback_level = ladder_level
+                break
 
         as_of_date = tranche_objs[0]["rebalance_date"] if tranche_objs else (mom_date or ma_date)
 
@@ -716,12 +960,56 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         liq_field_detected = None
         if score_mode == "factor" and final_port:
             factors, liq_field_detected = _compute_factors_for_codes(as_of_date, list(final_port.keys()), cfg)
+            r5 = {c: factors[c]["ret_5d"] for c in factors}
             r10 = {c: factors[c]["ret_10d"] for c in factors}
             r20 = {c: factors[c]["ret_20d"] for c in factors}
+            ma60 = {c: factors[c]["ma_60d"] for c in factors}
             v20 = {c: factors[c]["vol_20d"] for c in factors}
             liq = {c: factors[c]["liq_20d"] for c in factors}
-            zr10, zr20, zv20, zliq = _zscore(r10), _zscore(r20), _zscore(v20), _zscore(liq)
-            zfactors = {c: {"ret_10d": zr10.get(c, 0.0), "ret_20d": zr20.get(c, 0.0), "vol_20d": zv20.get(c, 0.0), "liq_20d": zliq.get(c, 0.0)} for c in factors}
+            zr5, zr10, zr20, zma60, zv20, zliq = (
+                _zscore(r5),
+                _zscore(r10),
+                _zscore(r20),
+                _zscore(ma60),
+                _zscore(v20),
+                _zscore(liq),
+            )
+            zfactors = {
+                c: {
+                    "ret_5d": zr5.get(c, 0.0),
+                    "ret_10d": zr10.get(c, 0.0),
+                    "ret_20d": zr20.get(c, 0.0),
+                    "ma_60d": zma60.get(c, 0.0),
+                    "vol_20d": zv20.get(c, 0.0),
+                    "liq_20d": zliq.get(c, 0.0),
+                }
+                for c in factors
+            }
+
+        # Optional: drop tiny weights (e.g., tranche-only names).
+        # NOTE: do NOT renormalize yet; we may intentionally leave some weight unallocated
+        # and route it to the fallback asset (L3).
+        if min_weight and min_weight > 0:
+            final_port = {c: w for c, w in final_port.items() if float(w) >= float(min_weight)}
+
+        # Fallback ladder (L3): if after L2 we still have too few names, park remaining weight in a substitute asset.
+        eff_n = len(final_port)
+        if fallback_level == "L2" and eff_n < MIN_POS:
+            fallback_level = "L3"
+            fallback_trigger_reason = "candidates<6 after L2"
+            s = sum(max(0.0, float(w)) for w in final_port.values())
+            fallback_weight = max(0.0, 1.0 - float(s))
+            # If everything got filtered out, allocate 100% to fallback asset.
+            if s <= 1e-12:
+                fallback_weight = 1.0
+            if fallback_weight > 1e-12:
+                final_port[fallback_asset] = final_port.get(fallback_asset, 0.0) + fallback_weight
+                final_scores[fallback_asset] = 0.0
+
+        # Final normalize
+        s = sum(max(0.0, float(w)) for w in final_port.values())
+        if s > 0:
+            final_port = {c: float(w) / s for c, w in final_port.items() if float(w) > 0}
 
         positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
 
@@ -738,6 +1026,13 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             "ma": ma,
             "ma_mode": ma_mode,
             "score_mode": score_mode,
+            "score_w_ret_20d": float(cfg.get("score_w_ret_20d", FAC_WEIGHTS["ret_20d"])),
+            "score_w_ret_10d": float(cfg.get("score_w_ret_10d", FAC_WEIGHTS["ret_10d"])),
+            "score_w_ret_5d": float(cfg.get("score_w_ret_5d", FAC_WEIGHTS["ret_5d"])),
+            "score_w_ma_60d": float(cfg.get("score_w_ma_60d", FAC_WEIGHTS["ma_60d"])),
+            "score_w_vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
+            "score_w_liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
+            "min_weight": min_weight,
             "execution_mode": execution_mode,
             "backup_k": backup_k,
             "limit_tiering": limit_tiering,
@@ -746,7 +1041,24 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             "limit_touch_mode": limit_touch_mode,
             "limit_touch_eps": limit_touch_eps,
             "auto_relax": stats.get("auto_relax") if isinstance(stats, dict) else None,
-            "hard_filters": {"vol_20d_max": hard_vol_20d_max, "liq_20d_min": hard_liq_20d_min},
+            "hard_filters": {
+                "vol_20d_max": hard_vol_20d_max,
+                "liq_20d_min": hard_liq_20d_min,
+                "dist_252h_min": hard_dist_252h_min,
+                "breakout_60_min": hard_breakout_60_min,
+                "drawdown_60_min": hard_drawdown_60_min,
+                "downvol_q": hard_downvol_q,
+            },
+            "hard_filter_stats": hard_filter_stats,
+            "ladder": {
+                "level_used": fallback_level,
+                "runs": ladder_runs,
+            },
+            "fallback": {
+                "level": fallback_level,
+                "trigger_reason": fallback_trigger_reason,
+                "asset": fallback_asset,
+            },
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,
             "tranches": tranche_objs,
