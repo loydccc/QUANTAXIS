@@ -124,15 +124,31 @@ def main():
         # Stable checkpoint id per day to support resume.
         # Version suffix allows re-running days when audit/meta schema changes.
         sid = f"daily_{d.replace('-', '')}_fb_{AUDIT_VERSION}"
+        obj = None
         sp = status_path(sid)
         if sp.exists():
             st = json.loads(sp.read_text(encoding="utf-8"))
-            if st.get("status") == "succeeded":
-                obj = load_signal_json(sid)
+            s = st.get("status")
+            # If a run is stuck in "running" for too long, treat as failed and rerun.
+            if s == "running":
+                started_at = float(st.get("started_at") or 0)
+                age = time.time() - started_at if started_at > 0 else 10**9
+                if age > 600:  # 10 minutes
+                    sp.rename(sp.with_suffix(sp.suffix + f".stuck_{int(time.time())}"))
+                else:
+                    continue
+            elif s == "succeeded":
+                # Require output json to exist (non-empty) as completion criterion.
+                jp = ROOT / "output" / "signals" / f"{sid}.json"
+                if not jp.exists() or jp.stat().st_size == 0:
+                    sp.rename(sp.with_suffix(sp.suffix + f".bad_{int(time.time())}"))
+                else:
+                    obj = load_signal_json(sid)
             else:
-                # failed/running from previous attempt; skip for now
-                continue
-        else:
+                # failed/other: rerun
+                sp.rename(sp.with_suffix(sp.suffix + f".retry_{int(time.time())}"))
+
+        if obj is None:
             cfg = dict(cfg_base)
             cfg["end"] = d
             run_signal(sid, cfg)
