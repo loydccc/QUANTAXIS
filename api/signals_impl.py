@@ -193,11 +193,16 @@ def _portfolio_to_positions(
     scores: Optional[Dict[str, float]] = None,
     factors: Optional[Dict[str, Dict[str, float]]] = None,
     zfactors: Optional[Dict[str, Dict[str, float]]] = None,
+    *,
+    normalize: bool = True,
 ) -> list[dict]:
     s = sum(max(0.0, float(w)) for w in port.values())
     if s <= 0:
         return []
-    items = [(c, float(w) / s) for c, w in port.items() if float(w) > 0]
+    if normalize:
+        items = [(c, float(w) / s) for c, w in port.items() if float(w) > 0]
+    else:
+        items = [(c, float(w)) for c, w in port.items() if float(w) > 0]
 
     def sk(x):
         c, w = x
@@ -1175,7 +1180,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             final_port = {c: float(w) * exposure for c, w in final_port.items()}
         cash_weight = float(max(0.0, 1.0 - sum(max(0.0, float(w)) for w in final_port.values())))
 
-        positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
+        # Build positions without renormalizing, then append cash.
+        positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors, normalize=False)
+        if cash_weight > 1e-12:
+            positions.append({"code": "CASH", "weight": round(float(cash_weight), 10), "rank": 10**9, "score": 0.0})
 
         stats = mom_stats
         meta_base = {
