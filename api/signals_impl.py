@@ -29,6 +29,8 @@ from api.core import ROOT, SIGNALS_DIR
 from api.security import validate_cfg_envelope
 from api.state import job_sem
 
+HEALTH_SCORE_CSV_DEFAULT = str(ROOT / "output" / "reports" / "health_index" / "health_score_2022.csv")
+
 
 # --- Factor score config (versioned in signal meta) ---
 FAC_WINDOWS = {
@@ -571,6 +573,36 @@ def _near_bps(a: float, b: float, eps_bps: float) -> bool:
     return abs(a - b) <= abs(b) * (float(eps_bps) / 10000.0)
 
 
+def _clip(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, float(x))))
+
+
+def _load_health_score(date_iso: str) -> tuple[float | None, str | None]:
+    """Load health_score for date from CSV (if available).
+
+    Returns (score, path). Score is None if not available.
+    """
+    import csv
+
+    path = str(os.getenv("QUANTAXIS_HEALTH_SCORE_CSV", HEALTH_SCORE_CSV_DEFAULT)).strip()
+    if not path or not Path(path).exists():
+        return None, (path or None)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                if str(row.get("date")) == str(date_iso):
+                    try:
+                        return float(row.get("health_score")), path
+                    except Exception:
+                        return None, path
+    except Exception:
+        return None, path
+
+    return None, path
+
+
 # -------------------------
 # main signal generator
 # -------------------------
@@ -876,6 +908,14 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 picks = ranked[:top_k]
                 backups = ranked[top_k : top_k + max(0, backup_k)]
 
+                # Weight concentration BEFORE applying min_weight:
+                # If we use tranche_overlap (n_tr=2), equal-weight top_k can fall below min_weight
+                # (e.g., 0.5*(1/20)=0.025 < 0.04) and get wiped out.
+                # We keep selection top_k unchanged, but allocate weights only to the head.
+                k_alloc = min(int(top_k), max(int(MIN_POS) * 2, 12))
+                k_alloc = max(1, min(int(top_k), int(k_alloc)))
+                picks_alloc = picks[:k_alloc]
+
                 # Execution realism (BUY-side): block new buys at up-limit and fill with backups
                 if execution_mode == "realistic" and backups:
                     prev_set = set()
@@ -966,7 +1006,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                                 break
                         picks = keep + add
 
-                tranche_port = {c: (1.0 / len(picks) if picks else 0.0) for c in picks}
+                tranche_port = {c: (1.0 / len(picks_alloc) if picks_alloc else 0.0) for c in picks_alloc}
 
                 contrib: Dict[str, float] = {}
                 for c, w in tranche_port.items():
@@ -976,7 +1016,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
 
                 tranche_contribs.append(contrib)
-                tranche_objs.append({"rebalance_date": mom_tr[t]["rebalance_date"], "effective_date": mom_tr[t]["effective_date"], "picks": picks})
+                tranche_objs.append(
+                    {
+                        "rebalance_date": mom_tr[t]["rebalance_date"],
+                        "effective_date": mom_tr[t]["effective_date"],
+                        "picks": picks,
+                        "picks_alloc": picks_alloc,
+                        "k_alloc": int(k_alloc),
+                    }
+                )
 
             # --- Ladder evaluation (use effective positions after min_weight) ---
             eff_port = dict(final_port)
@@ -1118,6 +1166,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         if s > 0:
             final_port = {c: float(w) / s for c, w in final_port.items() if float(w) > 0}
 
+        # --- Health Index v1 integration (ONLY affects overall exposure via cash) ---
+        # Does NOT change selection, ranking, factor computation, ladder thresholds, or weights' relative structure.
+        health_score, health_path = _load_health_score(as_of_date)
+        exposure = _clip(health_score if health_score is not None else 1.0, 0.4, 1.0)
+
+        if exposure < 1.0:
+            final_port = {c: float(w) * exposure for c, w in final_port.items()}
+        cash_weight = float(max(0.0, 1.0 - sum(max(0.0, float(w)) for w in final_port.values())))
+
         positions = _portfolio_to_positions(final_port, scores=final_scores, factors=factors, zfactors=zfactors)
 
         stats = mom_stats
@@ -1167,6 +1224,12 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "asset": fallback_asset,
                 "disabled": disable_fallback,
             },
+            "health": {
+                "health_score": health_score,
+                "exposure": float(exposure),
+                "cash_weight": float(cash_weight),
+                "path": health_path,
+            },
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,
             "tranches": tranche_objs,
@@ -1175,6 +1238,20 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
         meta_sig = json.dumps(meta_base, sort_keys=True, ensure_ascii=False)
         config_signature = hashlib.sha256(meta_sig.encode("utf-8")).hexdigest()
+
+        # Append minimal daily health log: date, health_score, exposure, level_used
+        try:
+            log_dir = ROOT / "output" / "reports" / "health_index"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "health_signal_log.csv"
+            line = f"{as_of_date},{'' if health_score is None else health_score},{exposure},{fallback_level}\n"
+            if not log_path.exists():
+                log_path.write_text("date,health_score,exposure,level_used\n" + line, encoding="utf-8")
+            else:
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception:
+            pass
 
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
