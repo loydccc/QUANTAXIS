@@ -194,11 +194,14 @@ def main():
     n_tranches_total = int(len(arr))
     frac_lt6 = float((arr < 6).mean())
 
+    p05 = float(arr.quantile(0.05))
+
     out = {
         "period": {"start": start, "end": end, "theme": theme},
         "num_tranches_total": n_tranches_total,
         "min_tranche_effective_positions_after_min_weight": min_eff,
         "frac_tranche_lt6": frac_lt6,
+        "p05_tranche_effective_positions_after_min_weight": p05,
     }
     (OUTDIR / f"daily_tranche_{start}_{end}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(out, ensure_ascii=False))
