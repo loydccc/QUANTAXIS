@@ -26,6 +26,9 @@ def main():
     ap.add_argument("--theme", default="a_ex_kcb_bse")
     ap.add_argument("--run-hi", action="store_true")
     ap.add_argument("--run-signal", action="store_true")
+    ap.add_argument("--skip-ingest", action="store_true", help="for dry-run acceptance: do not call ingest step")
+    ap.add_argument("--signal-theme", default="a_ex_kcb_bse")
+    ap.add_argument("--signal-top-k", type=int, default=20)
     args = ap.parse_args()
 
     env = os.environ.copy()
@@ -36,7 +39,8 @@ def main():
     env.setdefault("MONGODB_PASSWORD", "quantaxis")
 
     # A) ingest
-    subprocess.check_call(["python3", "scripts/ingest_daily_market_data.py", "--date", args.date, "--theme", args.theme], cwd=str(ROOT), env=env)
+    if not args.skip_ingest:
+        subprocess.check_call(["python3", "scripts/ingest_daily_market_data.py", "--date", args.date, "--theme", args.theme], cwd=str(ROOT), env=env)
 
     # B) validate
     v = subprocess.run(["python3", "scripts/validate_daily_data.py", "--date", args.date], cwd=str(ROOT), env=env, capture_output=True, text=True)
@@ -48,6 +52,7 @@ def main():
     # C) seal
     s = subprocess.run(["python3", "scripts/seal_trading_day.py", "--date", args.date, "--validate-json", validate_json], cwd=str(ROOT), env=env, capture_output=True, text=True)
     sealed_ok = s.returncode == 0
+    sealed_doc = json.loads((s.stdout or "{}").strip().splitlines()[-1]) if (s.stdout or "").strip() else None
 
     if not sealed_ok:
         # degradation: do not run HI/signal
@@ -58,10 +63,47 @@ def main():
     if args.run_hi:
         subprocess.check_call(["python3", "scripts/health_index_daily_cache.py", "--date", args.date], cwd=str(ROOT), env=env)
 
-    # Optional: run signal (weekly cadence still applies; end date can be set to today)
+    # Optional: run signal (minimal v1): fixed cfg + embed sealed_date into meta
     if args.run_signal:
-        # leave to operator/scheduler to provide exact cfg in production
-        print(json.dumps({"date": args.date, "sealed_ok": True, "action": "SIGNAL_NOT_CONFIGURED_IN_PIPELINE"}, ensure_ascii=False))
+        import time
+        from api.signals_impl import run_signal
+
+        signal_id = f"prod_signal_{args.date.replace('-', '')}_{int(time.time())}"
+        cfg = {
+            "strategy": "hybrid_baseline_weekly_topk",
+            "theme": args.signal_theme,
+            "rebalance": "weekly",
+            "top_k": int(args.signal_top_k),
+            "candidate_k": 100,
+            "min_bars": 800,
+            "liq_window": 20,
+            "liq_min_ratio": 1.0,
+            "hold_weeks": 2,
+            "tranche_overlap": True,
+            "ma_mode": "filter",
+            "score_mode": "factor",
+            "min_weight": 0.04,
+            "hard_dist_252h_min": -0.4,
+            "hard_downvol_q": 0.70,
+            "fallback_asset": "510300",
+            "start": "2019-01-01",
+            "end": args.date,
+        }
+        run_signal(signal_id, cfg)
+
+        # Patch meta.ops fields without changing positions.
+        sig_path = ROOT / "output" / "signals" / f"{signal_id}.json"
+        sig = json.loads(sig_path.read_text(encoding="utf-8"))
+        sig.setdefault("meta", {})
+        sig["meta"].setdefault("ops", {})
+        sig["meta"]["ops"].update(
+            {
+                "sealed_date": args.date,
+                "sealed_ok": True,
+                "data_etag": (sealed_doc or {}).get("etag"),
+            }
+        )
+        sig_path.write_text(json.dumps(sig, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(json.dumps({"date": args.date, "sealed_ok": True, "validate": obj.get("counts")}, ensure_ascii=False))
 

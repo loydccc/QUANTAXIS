@@ -37,6 +37,12 @@
 1) Place orders according to positions
 2) Execution realism checks (limits, etc.) are handled inside signal generator when enabled.
 
+## 1.5) How “latest pick” is produced (fixed)
+For a given trading date `D`:
+1) `daily_pipeline.py --date D --run-hi --run-signal`
+2) Use the produced signal JSON in `output/signals/prod_signal_<D>_*.json`.
+3) If `sealed_ok=false`: **HOLD_PREV** (no new signal; no HI cache is produced).
+
 ## 2) Degradation / Failure Handling (write-dead simple)
 
 ### HI cache missing
