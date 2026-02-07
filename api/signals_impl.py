@@ -29,7 +29,7 @@ from api.core import ROOT, SIGNALS_DIR
 from api.security import validate_cfg_envelope
 from api.state import job_sem
 
-HEALTH_SCORE_CSV_DEFAULT = str(ROOT / "output" / "reports" / "health_index" / "health_score_2022.csv")
+HEALTH_CACHE_DIR_DEFAULT = str(ROOT / "output" / "reports" / "health_index" / "daily")
 
 
 # --- Factor score config (versioned in signal meta) ---
@@ -583,29 +583,29 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 
 def _load_health_score(date_iso: str) -> tuple[float | None, str | None]:
-    """Load health_score for date from CSV (if available).
+    """Load health_score for date from the daily cache.
 
-    Returns (score, path). Score is None if not available.
+    Spec:
+    - run_signal only reads today's cache.
+    - if missing => exposure=1 and meta.health_missing=true.
+
+    Returns (score, source_path). score=None when missing.
     """
-    import csv
 
-    path = str(os.getenv("QUANTAXIS_HEALTH_SCORE_CSV", HEALTH_SCORE_CSV_DEFAULT)).strip()
-    if not path or not Path(path).exists():
-        return None, (path or None)
+    cache_dir = str(os.getenv("QUANTAXIS_HEALTH_CACHE_DIR", HEALTH_CACHE_DIR_DEFAULT)).strip()
+    if not cache_dir:
+        return None, None
+
+    p = Path(cache_dir) / f"health_score_{date_iso}.json"
+    if not p.exists() or p.stat().st_size == 0:
+        return None, str(p)
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                if str(row.get("date")) == str(date_iso):
-                    try:
-                        return float(row.get("health_score")), path
-                    except Exception:
-                        return None, path
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        sc = obj.get("health_score")
+        return (float(sc) if sc is not None else None), str(p)
     except Exception:
-        return None, path
-
-    return None, path
+        return None, str(p)
 
 
 # -------------------------
@@ -1174,6 +1174,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         # --- Health Index v1 integration (ONLY affects overall exposure via cash) ---
         # Does NOT change selection, ranking, factor computation, ladder thresholds, or weights' relative structure.
         health_score, health_path = _load_health_score(as_of_date)
+        health_missing = health_score is None
+        # If missing, default to full exposure (per spec).
         exposure = _clip(health_score if health_score is not None else 1.0, 0.4, 1.0)
 
         if exposure < 1.0:
@@ -1237,6 +1239,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "exposure": float(exposure),
                 "cash_weight": float(cash_weight),
                 "path": health_path,
+                "health_missing": bool(health_missing),
             },
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,
