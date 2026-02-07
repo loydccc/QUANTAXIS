@@ -30,6 +30,7 @@ def main():
     ap.add_argument("--run-hi", action="store_true")
     ap.add_argument("--run-signal", action="store_true")
     ap.add_argument("--skip-ingest", action="store_true", help="for dry-run acceptance: do not call ingest step")
+    ap.add_argument("--shadow", action="store_true", help="shadow-run mode: never execute orders (pipeline remains dry-run)")
     ap.add_argument("--signal-theme", default="a_ex_kcb_bse")
     ap.add_argument("--signal-top-k", type=int, default=20)
     ap.add_argument("--mongo-host", default="127.0.0.1")
@@ -82,6 +83,8 @@ def main():
         signal_id = f"prod_signal_{args.date.replace('-', '')}_{int(time.time())}"
         cfg = {
             "strategy": "hybrid_baseline_weekly_topk",
+            "shadow": bool(args.shadow),
+            "execution_mode": "shadow" if args.shadow else "naive",
             "theme": args.signal_theme,
             "rebalance": "weekly",
             "top_k": int(args.signal_top_k),

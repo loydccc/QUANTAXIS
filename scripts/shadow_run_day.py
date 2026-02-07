@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""T-3 shadow run helper.
+"""Shadow-run single-day entrypoint (production hardening).
 
-Runs daily_pipeline end-to-end (ingest->validate->seal->HI->signal) and then
-verifies required artifacts + assertions.
-
-Outputs a compact JSON report to stdout and writes it to:
-  output/reports/shadow_runs/<date>.json
-
-Exit code:
-- 0: PASS
-- 2: FAIL
-
-Usage:
-  python3 scripts/shadow_run_day.py --date YYYY-MM-DD
-
-Notes:
-- This is SHADOW mode: it does not place orders.
-- It expects Mongo credentials via env or daily_pipeline defaults.
+Spec (fixed):
+- ONLY shadow-run (no execution / no orders).
+- Fixed sequence: daily_pipeline --run-hi --run-signal --shadow -> assertions.
+- Stdout: one-line JSON with {date, shadow, sealed_ok, signal_ok, assertions_ok, alerts_sent}.
+- Exit code: 0 if all PASS else 2.
+- Writes daily report to output/reports/shadow_run/YYYY-MM-DD.json (overwrites on rerun).
 """
 
 from __future__ import annotations
@@ -32,7 +22,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_DIR = ROOT / "output" / "reports" / "shadow_runs"
+REPORT_DIR = ROOT / "output" / "reports" / "shadow_run"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_POS = 6
@@ -61,31 +51,20 @@ def _cash_weight(sig: dict) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True)
-    ap.add_argument("--theme", default="a_ex_kcb_bse")
-    ap.add_argument("--signal-theme", default="a_ex_kcb_bse")
-    ap.add_argument("--signal-top-k", type=int, default=20)
-    ap.add_argument("--skip-ingest", action="store_true", help="for local dry checks only")
     args = ap.parse_args()
 
     date = str(args.date)
 
-    # 1) Run pipeline (full chain)
+    # 1) Fixed-order pipeline (shadow only)
     cmd = [
         "python3",
         "scripts/daily_pipeline.py",
         "--date",
         date,
-        "--theme",
-        args.theme,
         "--run-hi",
         "--run-signal",
-        "--signal-theme",
-        args.signal_theme,
-        "--signal-top-k",
-        str(args.signal_top_k),
+        "--shadow",
     ]
-    if args.skip_ingest:
-        cmd.append("--skip-ingest")
 
     proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
 
@@ -115,11 +94,12 @@ def main():
 
     report: dict = {
         "date": date,
+        "shadow": True,
         "pipeline": {
             "ok": pipeline_ok,
             "returncode": proc.returncode,
             "tail": pipeline_tail,
-        "stderr_tail": pipeline_err_tail,
+            "stderr_tail": pipeline_err_tail,
         },
         "artifacts": {
             "ops_data_status": str(ops_path),
@@ -128,13 +108,14 @@ def main():
             "health_signal_log": str(health_log_path),
             "missing": missing,
         },
+        "execution_skipped": True,
         "assertions": {},
     }
 
     if missing:
         report["ok"] = False
         (REPORT_DIR / f"{date}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(json.dumps(report, ensure_ascii=False))
+        print(json.dumps({"date": date, "shadow": True, "sealed_ok": False, "signal_ok": False, "assertions_ok": False, "alerts_sent": False}, ensure_ascii=False))
         raise SystemExit(2)
 
     ops = _read_json(ops_path)
@@ -150,11 +131,11 @@ def main():
     # A3 signal succeeded
     a3 = str(sig.get("status")) == "succeeded"
 
-    # A4 funds conservation: positions already include CASH when needed
+    # A4 funds conservation: abs(sum(non_cash_weights)+cash-1) <= 1e-9
     positions = sig.get("positions", []) or []
-    sw = _sum_weights(positions)
+    sw = _sum_weights([p for p in positions if str(p.get("code")).upper() != "CASH"])
     cw = _cash_weight(sig)
-    a4 = abs(sw - 1.0) <= 1e-9
+    a4 = abs((sw + cw) - 1.0) <= 1e-9
 
     # A5 cash range
     a5 = (0.0 <= cw <= 0.6)
@@ -163,12 +144,12 @@ def main():
     sealed_date = (((sig.get("meta", {}) or {}).get("ops", {}) or {}).get("sealed_date"))
     a6 = (sealed_date == date)
 
-    # A7 HI consistency
+    # A7 HI consistency (meta vs cache must match exactly)
     mh = (sig.get("meta", {}) or {}).get("health", {}) or {}
     a7 = (
         (mh.get("health_missing") is False)
         and (mh.get("health_score") is not None)
-        and (abs(float(mh.get("health_score")) - float(hi.get("health_score"))) <= 0.0)
+        and (float(mh.get("health_score")) == float(hi.get("health_score")))
     )
 
     # A8 position sanity
@@ -176,29 +157,49 @@ def main():
     a8 = (len(positions) >= MIN_POS) and (not any_neg)
 
     report["assertions"] = {
-        "sealed_ok_true": a1,
-        "health_components_ge_5": a2,
-        "signal_succeeded": a3,
         "funds_conservation": a4,
         "cash_weight_in_range": a5,
         "meta_ops_sealed_date_match": a6,
         "meta_health_matches_cache": a7,
         "positions_sane": a8,
         "debug": {
-            "sum_weights": sw,
+            "sum_non_cash_weights": sw,
             "cash_weight": cw,
             "sealed_date": sealed_date,
             "health_score_meta": mh.get("health_score"),
             "health_score_cache": hi.get("health_score"),
             "positions_n": len(positions),
+            "signal_status": sig.get("status"),
+            "n_components_used": hi.get("n_components_used"),
         },
     }
 
-    ok = all([a1, a2, a3, a4, a5, a6, a7, a8])
+    sealed_ok = a1
+    signal_ok = a3
+    assertions_ok = all([a4, a5, a6, a7, a8])
+    ok = bool(sealed_ok and a2 and signal_ok and assertions_ok)
     report["ok"] = ok
+    report["sealed_ok"] = sealed_ok
+    report["signal_ok"] = signal_ok
+    report["assertions_ok"] = assertions_ok
+    report["alerts_sent"] = False
 
     (REPORT_DIR / f"{date}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False))
+
+    # Spec: stdout one-line JSON
+    print(
+        json.dumps(
+            {
+                "date": date,
+                "shadow": True,
+                "sealed_ok": bool(sealed_ok),
+                "signal_ok": bool(signal_ok),
+                "assertions_ok": bool(assertions_ok),
+                "alerts_sent": False,
+            },
+            ensure_ascii=False,
+        )
+    )
     raise SystemExit(0 if ok else 2)
 
 
