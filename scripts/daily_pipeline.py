@@ -15,9 +15,12 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# ensure repo root on import path so `import api.*` works when running from scripts/
+sys.path.insert(0, str(ROOT))
 
 
 def main():
