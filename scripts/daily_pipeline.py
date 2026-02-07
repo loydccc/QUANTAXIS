@@ -40,6 +40,8 @@ def main():
     env.setdefault("MONGODB_DATABASE", "quantaxis")
     env.setdefault("MONGODB_USER", "quantaxis")
     env.setdefault("MONGODB_PASSWORD", "quantaxis")
+    # ensure in-process modules (run_signal) see the same env
+    os.environ.update(env)
 
     # A) ingest
     if not args.skip_ingest:
