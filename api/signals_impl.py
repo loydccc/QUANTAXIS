@@ -1173,7 +1173,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
         # --- Health Index v1 integration (ONLY affects overall exposure via cash) ---
         # Does NOT change selection, ranking, factor computation, ladder thresholds, or weights' relative structure.
-        health_score, health_path = _load_health_score(as_of_date)
+        health_date = cfg.get("health_date") or as_of_date
+        health_score, health_path = _load_health_score(health_date)
         health_missing = health_score is None
         # If missing, default to full exposure (per spec).
         exposure = _clip(health_score if health_score is not None else 1.0, 0.4, 1.0)
@@ -1255,7 +1256,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             log_dir = ROOT / "output" / "reports" / "health_index"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "health_signal_log.csv"
-            line = f"{as_of_date},{'' if health_score is None else health_score},{exposure},{fallback_level}\n"
+            line = f"{health_date},{'' if health_score is None else health_score},{exposure},{fallback_level}\n"
             if not log_path.exists():
                 log_path.write_text("date,health_score,exposure,level_used\n" + line, encoding="utf-8")
             else:

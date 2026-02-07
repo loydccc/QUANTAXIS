@@ -99,6 +99,7 @@ def main():
             "fallback_asset": "510300",
             "start": "2019-01-01",
             "end": args.date,
+            "health_date": args.date,
         }
         run_signal(signal_id, cfg)
 
