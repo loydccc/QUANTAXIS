@@ -3,12 +3,10 @@
 """Validate daily data completeness for a given trading date.
 
 Production v1 checks (fixed spec):
-- n_codes_today >= 3000 (stock_day)
+- n_codes_today >= 3000 (stock_day, excluding 510300)
+- 510300 close exists for date
 - uniqueness: no duplicate (code,date)
-- close/amount non-null ratio > 98% (stock_day)
-
-Best-effort / non-blocking checks (recorded in counts but do NOT block sealing):
-- 510300 close exists for date (legacy expectation; some datasets may not include ETF)
+- close/amount non-null ratio > 98% (stock_day, excluding 510300)
 
 Outputs JSON summary to stdout.
 Exit code:
@@ -54,8 +52,8 @@ def main():
 
     d = str(args.date)
 
-    # count distinct codes for the date
-    codes = coll.distinct("code", {"date": d})
+    # count distinct codes for the date (exclude 510300)
+    codes = coll.distinct("code", {"date": d, "code": {"$ne": "510300"}})
     n_codes = len(codes)
 
     # 510300 close exists
@@ -72,16 +70,17 @@ def main():
     dups = list(coll.aggregate(dup_pipe, allowDiskUse=True))
     uniq_ok = len(dups) == 0
 
-    # non-null ratios
-    total = coll.count_documents({"date": d})
-    missing_close = coll.count_documents({"date": d, "$or": [{"close": None}, {"close": {"$exists": False}}]})
-    missing_amount = coll.count_documents({"date": d, "$or": [{"amount": None}, {"amount": {"$exists": False}}]})
+    # non-null ratios (exclude 510300)
+    total = coll.count_documents({"date": d, "code": {"$ne": "510300"}})
+    missing_close = coll.count_documents({"date": d, "code": {"$ne": "510300"}, "$or": [{"close": None}, {"close": {"$exists": False}}]})
+    missing_amount = coll.count_documents({"date": d, "code": {"$ne": "510300"}, "$or": [{"amount": None}, {"amount": {"$exists": False}}]})
 
     close_ratio = 1.0 if total == 0 else (1.0 - missing_close / total)
     amount_ratio = 1.0 if total == 0 else (1.0 - missing_amount / total)
 
     validate_ok = (
         n_codes >= int(args.min_codes)
+        and etf_ok
         and uniq_ok
         and close_ratio >= float(args.nonnull_ratio)
         and amount_ratio >= float(args.nonnull_ratio)
