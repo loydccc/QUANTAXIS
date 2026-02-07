@@ -38,10 +38,13 @@
 2) Execution realism checks (limits, etc.) are handled inside signal generator when enabled.
 
 ## 1.5) How “latest pick” is produced (fixed)
-For a given trading date `D`:
+For a given trading date `D`, the production sequence is:
+- `ingest → validate → seal → HI → signal → execution`
+
+Operator flow:
 1) `daily_pipeline.py --date D --run-hi --run-signal`
 2) Use the produced signal JSON in `output/signals/prod_signal_<D>_*.json`.
-3) If `sealed_ok=false`: **HOLD_PREV** (no new signal; no HI cache is produced).
+3) If `sealed_ok=false`: **HOLD_PREV** (no new signal; no HI cache is produced) and record the seal failure reason.
 
 ## 2) Degradation / Failure Handling (write-dead simple)
 
