@@ -98,8 +98,13 @@ def compute_for_date(db, date_iso: str) -> dict:
     mx60 = close.rolling(60, min_periods=60).max()
     pass_ratio = float((close.loc[end] >= 0.98 * mx60.loc[end]).mean()) if end in mx60.index else float("nan")
 
-    # 4) signal_stability: not available here (leave NaN)
-    q80_rank_std = float("nan")
+    # 4) signal_stability: cross-sectional rank stability of 20D returns.
+    # Compute 20D return ranks (pct) each day, then measure rolling 20D std of ranks per asset.
+    # Take q80 across assets for end date.
+    ret20 = close.pct_change(20, fill_method=None)
+    rank20 = ret20.rank(axis=1, pct=True)
+    rank_std20 = rank20.rolling(20, min_periods=20).std()
+    q80_rank_std = float(rank_std20.loc[end].quantile(0.8)) if end in rank_std20.index else float("nan")
 
     # 6) portfolio_feasibility: not available pre-signal (leave NaN)
     p05_eff = float("nan")
