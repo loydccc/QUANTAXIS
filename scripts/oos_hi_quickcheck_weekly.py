@@ -86,12 +86,18 @@ def weights_by_day(runs: list[dict], close_idx: pd.DatetimeIndex) -> pd.DataFram
     return wdf
 
 
-def equity_from_close(close: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
+def equity_from_close(close: pd.DataFrame, w: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return (equity, daily_ret, daily_turnover).
+
+    Turnover is 0.5 * sum(|w_t - w_{t-1}|) using effective (t-1) holdings.
+    """
     w = w.reindex(close.index).ffill().fillna(0.0)
     w_eff = w.shift(1).fillna(0.0)
     dret = close.pct_change(fill_method=None).fillna(0.0)
     ret = (w_eff * dret).sum(axis=1)
-    return (1.0 + ret).cumprod()
+    eq = (1.0 + ret).cumprod()
+    turnover = 0.5 * w_eff.diff().abs().sum(axis=1).fillna(0.0)
+    return eq, ret, turnover
 
 
 def run_range(label: str, start: str, end: str, *, use_hi: bool, health_cache_dir: str | None) -> tuple[pd.Series, pd.Series]:
@@ -160,9 +166,8 @@ def run_range(label: str, start: str, end: str, *, use_hi: bool, health_cache_di
     close = build_close_panel(db, sorted({c for c in held_codes if c != "CASH"}), start, end)
 
     w = weights_by_day(runs, close.index)
-    eq = equity_from_close(close, w)
-    ret = eq.pct_change(fill_method=None).fillna(0.0)
-    return eq, ret
+    eq, ret, turnover = equity_from_close(close, w)
+    return eq, ret, turnover
 
 
 def main():
@@ -176,14 +181,25 @@ def main():
     outdir = OUTROOT / args.label
     outdir.mkdir(parents=True, exist_ok=True)
 
-    eq_b, r_b = run_range(args.label, args.start, args.end, use_hi=False, health_cache_dir=None)
-    eq_h, r_h = run_range(args.label, args.start, args.end, use_hi=True, health_cache_dir=args.health_cache_dir)
+    eq_b, r_b, t_b = run_range(args.label, args.start, args.end, use_hi=False, health_cache_dir=None)
+    eq_h, r_h, t_h = run_range(args.label, args.start, args.end, use_hi=True, health_cache_dir=args.health_cache_dir)
 
     pd.DataFrame({"date": eq_b.index.astype(str), "equity": eq_b.values}).to_csv(outdir / "equity_baseline.csv", index=False)
     pd.DataFrame({"date": eq_h.index.astype(str), "equity": eq_h.values}).to_csv(outdir / "equity_hi.csv", index=False)
 
-    base = {"mdd": mdd(r_b), "worst5_mean": worst5_mean(r_b), "mean": float(r_b.mean())}
-    hi = {"mdd": mdd(r_h), "worst5_mean": worst5_mean(r_h), "mean": float(r_h.mean())}
+    # annualized turnover (approx): mean daily turnover * 252
+    base = {
+        "mdd": mdd(r_b),
+        "worst5_mean": worst5_mean(r_b),
+        "mean": float(r_b.mean()),
+        "turnover_annualized": float(t_b.mean()) * 252.0,
+    }
+    hi = {
+        "mdd": mdd(r_h),
+        "worst5_mean": worst5_mean(r_h),
+        "mean": float(r_h.mean()),
+        "turnover_annualized": float(t_h.mean()) * 252.0,
+    }
 
     diff = {"mdd": hi["mdd"] - base["mdd"], "worst5_mean": hi["worst5_mean"] - base["worst5_mean"], "mean": hi["mean"] - base["mean"]}
     stats = {"period": {"start": args.start, "end": args.end}, "baseline": base, "hi": hi, "hi_minus_baseline": diff}
