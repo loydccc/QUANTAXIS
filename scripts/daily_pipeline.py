@@ -32,14 +32,20 @@ def main():
     ap.add_argument("--skip-ingest", action="store_true", help="for dry-run acceptance: do not call ingest step")
     ap.add_argument("--signal-theme", default="a_ex_kcb_bse")
     ap.add_argument("--signal-top-k", type=int, default=20)
+    ap.add_argument("--mongo-host", default="127.0.0.1")
+    ap.add_argument("--mongo-port", default="27017")
+    ap.add_argument("--mongo-db", default="quantaxis")
+    ap.add_argument("--mongo-user", default="quantaxis")
+    ap.add_argument("--mongo-password", default="quantaxis")
     args = ap.parse_args()
 
     env = os.environ.copy()
-    env.setdefault("MONGODB_HOST", "127.0.0.1")
-    env.setdefault("MONGODB_PORT", "27017")
-    env.setdefault("MONGODB_DATABASE", "quantaxis")
-    env.setdefault("MONGODB_USER", "quantaxis")
-    env.setdefault("MONGODB_PASSWORD", "quantaxis")
+    # Explicitly set Mongo target for this pipeline run (do not inherit accidental defaults like host=mongodb).
+    env["MONGODB_HOST"] = str(args.mongo_host)
+    env["MONGODB_PORT"] = str(args.mongo_port)
+    env["MONGODB_DATABASE"] = str(args.mongo_db)
+    env["MONGODB_USER"] = str(args.mongo_user)
+    env["MONGODB_PASSWORD"] = str(args.mongo_password)
     # ensure in-process modules (run_signal) see the same env
     os.environ.update(env)
 
