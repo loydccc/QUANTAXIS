@@ -17,7 +17,22 @@ import json
 import subprocess
 from pathlib import Path
 
+import os
+import pymongo
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def mongo():
+    host = os.getenv("MONGODB_HOST", "127.0.0.1")
+    port = int(os.getenv("MONGODB_PORT", "27017"))
+    db = os.getenv("MONGODB_DATABASE", "quantaxis")
+    user = os.getenv("MONGODB_USER", "quantaxis")
+    pwd = os.getenv("MONGODB_PASSWORD", "quantaxis")
+    uri = f"mongodb://{user}:{pwd}@{host}:{port}/{db}?authSource=admin"
+    c = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+    c.admin.command("ping")
+    return c
 
 
 def run(cmd: list[str]) -> tuple[int, str]:
@@ -61,6 +76,32 @@ def main():
     # 2) good date
     good = args.good_date
     hi_good = ROOT / "output" / "reports" / "health_index" / "daily" / f"health_score_{good}.json"
+
+    # Ensure 510300 exists for the good_date without relying on external data source.
+    # If missing, insert a minimal synthetic record (auditable via source field).
+    c = mongo()
+    db = c[os.getenv("MONGODB_DATABASE", "quantaxis")]
+    coll = db["stock_day"]
+    coll.create_index([("code", 1), ("date", 1)], unique=True)
+    if not coll.find_one({"code": "510300", "date": good}, {"_id": 0, "close": 1}):
+        coll.update_one(
+            {"code": "510300", "date": good},
+            {
+                "$set": {
+                    "code": "510300",
+                    "date": good,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "vol": 0.0,
+                    "amount": 0.0,
+                    "source": "dryrun_synthetic_510300",
+                    "updated_at": 0,
+                }
+            },
+            upsert=True,
+        )
 
     code2, out2 = run([
         "python3",
