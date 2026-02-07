@@ -15,7 +15,7 @@ Alerts implemented:
 1) health_score<0.2 streak>=3
 2) pct_exposure_at_floor rolling20 > 0.60
 
-Alert #3 and #4 are signal/equity dependent and should be evaluated in the signal runner.
+Other operational alerts are evaluated in the signal/shadow runner.
 """
 
 from __future__ import annotations

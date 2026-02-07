@@ -1368,12 +1368,21 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 for code in sorted(codes):
                     wp = float(prev_w.get(code, 0.0))
                     wc = float(curr_w.get(code, 0.0))
+                    fb_asset = ((meta_base.get("fallback", {}) or {}).get("asset"))
+                    curr_l3 = str(((meta_base.get("fallback", {}) or {}).get("level") or "")) == "L3"
+                    prev_l3 = str(((prev_sig.get("meta", {}) or {}).get("fallback", {}) or {}).get("level") or "") == "L3"
+                    is_fb_leg = (
+                        fb_asset is not None
+                        and str(code) == str(fb_asset)
+                        and (curr_l3 or prev_l3)
+                    )
+
                     if wp <= 0 and wc > 0:
                         if code.upper() != "CASH":
-                            entered.append({"code": code, "new_weight": wc, "reason": "rank_gain"})
+                            entered.append({"code": code, "new_weight": wc, "reason": "fallback_leg" if is_fb_leg else "rank_gain"})
                     elif wp > 0 and wc <= 0:
                         if code.upper() != "CASH":
-                            exited.append({"code": code, "old_weight": wp, "reason": "rank_change"})
+                            exited.append({"code": code, "old_weight": wp, "reason": "fallback_leg" if is_fb_leg else "rank_change"})
                     elif wp > 0 and wc > 0:
                         # reason
                         if code.upper() == "CASH":
@@ -1406,9 +1415,14 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
 
             # stale/hold smoothing
             current_picks = set((meta_base.get("picks_base") or [])[: int(top_k)])
+            fb_asset = ((meta_base.get("fallback", {}) or {}).get("asset"))
             pos_nc = [p for p in (positions or []) if str(p.get("code", "")).upper() != "CASH"]
             denom = float(sum(float(p.get("weight", 0.0) or 0.0) for p in pos_nc))
-            stale = [(str(p.get("code")), float(p.get("weight", 0.0) or 0.0)) for p in pos_nc if str(p.get("code")) not in current_picks]
+            stale = [
+                (str(p.get("code")), float(p.get("weight", 0.0) or 0.0))
+                for p in pos_nc
+                if (str(p.get("code")) not in current_picks) and (fb_asset is None or str(p.get("code")) != str(fb_asset))
+            ]
             stale_weight = float(sum(w for _c, w in stale))
             stale_sorted = sorted(stale, key=lambda x: -x[1])[:5]
             hold_smoothing = {

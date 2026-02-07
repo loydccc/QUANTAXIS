@@ -179,9 +179,44 @@ def main():
         m = sig.get("meta", {}) or {}
         report["turnover_attrib"] = m.get("turnover_attrib")
         report["hold_smoothing"] = m.get("hold_smoothing")
+
+        # Task B: turnover sanity invariants
+        ta = m.get("turnover_attrib") or {}
+        is_new_reb = bool(ta.get("is_new_rebalance"))
+        entered = ta.get("entered") or []
+        exited = ta.get("exited") or []
+        entered_nc = [x for x in entered if str(x.get("code", "")).upper() != "CASH"]
+        exited_nc = [x for x in exited if str(x.get("code", "")).upper() != "CASH"]
+
+        buy = float(ta.get("turnover_buy") or 0.0)
+        sell = float(ta.get("turnover_sell") or 0.0)
+        t2 = float(ta.get("turnover_2way") or 0.0)
+
+        # cash delta
+        prev_cash = None
+        curr_cash = None
+        kept = ta.get("kept") or []
+        for k in kept:
+            if str(k.get("code", "")).upper() == "CASH":
+                prev_cash = float(k.get("old_weight") or 0.0)
+                curr_cash = float(k.get("new_weight") or 0.0)
+        cash_delta = None if (prev_cash is None or curr_cash is None) else float(curr_cash - prev_cash)
+
+        inv = {
+            "is_new_rebalance": is_new_reb,
+            "non_rebalance_entered_exited_zero": (len(entered_nc) == 0 and len(exited_nc) == 0) if not is_new_reb else None,
+            "buy_sell_balance": abs(buy - sell) <= 1e-9,
+            "cash_mirror_exposure_scale": (abs(t2 - abs(cash_delta)) <= 1e-6) if (not is_new_reb and cash_delta is not None) else None,
+            "rebalance_turnover_ge_cash": (t2 >= abs(cash_delta)) if (is_new_reb and cash_delta is not None) else None,
+            "entered_n": int(len(entered_nc)),
+            "exited_n": int(len(exited_nc)),
+            "cash_delta": cash_delta,
+        }
+        report["turnover_sanity"] = inv
     except Exception:
         report["turnover_attrib"] = None
         report["hold_smoothing"] = None
+        report["turnover_sanity"] = None
 
     sealed_ok = a1
     signal_ok = a3
