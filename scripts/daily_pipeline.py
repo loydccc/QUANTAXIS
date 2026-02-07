@@ -103,6 +103,7 @@ def main():
             "start": "2019-01-01",
             "end": args.date,
             "health_date": args.date,
+            "sealed_date": args.date,
         }
         run_signal(signal_id, cfg)
 

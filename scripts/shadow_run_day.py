@@ -174,6 +174,15 @@ def main():
         },
     }
 
+    # Observability (meta-only)
+    try:
+        m = sig.get("meta", {}) or {}
+        report["turnover_attrib"] = m.get("turnover_attrib")
+        report["hold_smoothing"] = m.get("hold_smoothing")
+    except Exception:
+        report["turnover_attrib"] = None
+        report["hold_smoothing"] = None
+
     sealed_ok = a1
     signal_ok = a3
     assertions_ok = all([a4, a5, a6, a7, a8])

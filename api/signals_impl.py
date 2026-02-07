@@ -1189,11 +1189,15 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             positions.append({"code": "CASH", "weight": round(float(cash_weight), 10), "rank": 10**9, "score": 0.0})
 
         stats = mom_stats
+        sealed_date_for_ops = cfg.get("sealed_date") or as_of_date
+
         meta_base = {
             "strategy": strategy,
             "theme": theme,
             "top_k": top_k,
             "rebalance": "weekly",
+            "strategy_key": f"{strategy}:{theme}:{top_k}:{lookback}:{ma}:{ma_mode}:{score_mode}:{hold_weeks}:{int(tranche_overlap)}",
+            "picks_base": list(mom_picks) if isinstance(mom_picks, list) else None,
             "min_bars": int(cfg_used.get("min_bars", min_bars)),
             "liq_window": int(cfg_used.get("liq_window", liq_window)),
             "liq_min_ratio": float(cfg_used.get("liq_min_ratio", liq_min_ratio)),
@@ -1242,6 +1246,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "path": health_path,
                 "health_missing": bool(health_missing),
             },
+            "ops": {
+                "sealed_date": sealed_date_for_ops,
+                "sealed_ok": True,
+            },
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,
             "tranches": tranche_objs,
@@ -1264,6 +1272,156 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                     f.write(line)
         except Exception:
             pass
+
+        # --- Turnover attribution + hold smoothing (meta-only; does not affect positions) ---
+        def _weights_from_signal_meta(sig_obj: dict) -> dict:
+            pos = (sig_obj.get("positions") or [])
+            w = {}
+            for p in pos:
+                c = str(p.get("code"))
+                w[c] = float(p.get("weight", 0.0) or 0.0)
+            # Ensure CASH present as pseudo-asset
+            mh = (sig_obj.get("meta", {}) or {}).get("health", {}) or {}
+            cw = mh.get("cash_weight")
+            if cw is None:
+                cw = max(0.0, 1.0 - sum(max(0.0, float(x)) for k, x in w.items() if k.upper() != "CASH"))
+            w["CASH"] = float(cw)
+            # Normalize tiny float drift
+            s2 = sum(float(x) for x in w.values())
+            if s2 > 0:
+                for k in list(w.keys()):
+                    w[k] = float(w[k]) / s2
+            return w
+
+        def _load_prev_signal(strategy_key: str, sealed_date: str) -> dict | None:
+            import glob
+
+            candidates = []
+            for path in glob.glob(str(SIGNALS_DIR / "*.json")):
+                if path.endswith(".status.json"):
+                    continue
+                try:
+                    obj = json.loads(Path(path).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if obj.get("status") != "succeeded":
+                    continue
+                m = obj.get("meta", {}) or {}
+                if m.get("strategy_key") != strategy_key:
+                    continue
+                ops = (m.get("ops", {}) or {})
+                sd = ops.get("sealed_date")
+                if not isinstance(sd, str):
+                    continue
+                if sd >= sealed_date:
+                    continue
+                candidates.append((sd, int(obj.get("generated_at") or 0), obj))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            return candidates[-1][2]
+
+        def _is_exposure_scale(prev_w_nc: dict, curr_w_nc: dict, eps: float = 1e-6) -> bool:
+            sp = sum(prev_w_nc.values())
+            sc = sum(curr_w_nc.values())
+            if sp <= 1e-12 or sc <= 1e-12:
+                return False
+            k = sc / sp
+            codes = set(prev_w_nc.keys()) | set(curr_w_nc.keys())
+            for c in codes:
+                if abs(curr_w_nc.get(c, 0.0) - k * prev_w_nc.get(c, 0.0)) > eps:
+                    return False
+            return True
+
+        turnover_attrib = None
+        hold_smoothing = None
+        try:
+            strategy_key = meta_base.get("strategy_key")
+            prev_sig = _load_prev_signal(strategy_key, str(sealed_date_for_ops)) if strategy_key else None
+            if prev_sig is None:
+                turnover_attrib = {
+                    "prev_signal_id": None,
+                    "prev_as_of_date": None,
+                    "reason": "no_prev_signal",
+                    "entered": [],
+                    "exited": [],
+                    "kept": [],
+                    "turnover_buy": 0.0,
+                    "turnover_sell": 0.0,
+                    "turnover_2way": 0.0,
+                    "turnover_1way": 0.0,
+                    "is_new_rebalance": True,
+                }
+            else:
+                prev_w = _weights_from_signal_meta(prev_sig)
+                curr_stub = {"positions": positions, "meta": meta_base}
+                curr_w = _weights_from_signal_meta(curr_stub)
+
+                prev_asof = prev_sig.get("as_of_date")
+                is_new_rebalance = bool(str(prev_asof) != str(as_of_date))
+
+                entered = []
+                exited = []
+                kept = []
+
+                codes = set(prev_w.keys()) | set(curr_w.keys())
+                for code in sorted(codes):
+                    wp = float(prev_w.get(code, 0.0))
+                    wc = float(curr_w.get(code, 0.0))
+                    if wp <= 0 and wc > 0:
+                        if code.upper() != "CASH":
+                            entered.append({"code": code, "new_weight": wc, "reason": "rank_gain"})
+                    elif wp > 0 and wc <= 0:
+                        if code.upper() != "CASH":
+                            exited.append({"code": code, "old_weight": wp, "reason": "rank_change"})
+                    elif wp > 0 and wc > 0:
+                        # reason
+                        if code.upper() == "CASH":
+                            r = "exposure_scale"
+                        elif is_new_rebalance:
+                            r = "rebalance"
+                        else:
+                            prev_nc = {k: v for k, v in prev_w.items() if k.upper() != "CASH"}
+                            curr_nc = {k: v for k, v in curr_w.items() if k.upper() != "CASH"}
+                            r = "exposure_scale" if _is_exposure_scale(prev_nc, curr_nc) else "score_change"
+                        kept.append({"code": code, "old_weight": wp, "new_weight": wc, "reason": r})
+
+                diffs = {c: curr_w.get(c, 0.0) - prev_w.get(c, 0.0) for c in codes}
+                turnover_buy = float(sum(max(d, 0.0) for d in diffs.values()))
+                turnover_sell = float(sum(max(-d, 0.0) for d in diffs.values()))
+                turnover_2way = float(0.5 * sum(abs(d) for d in diffs.values()))
+
+                turnover_attrib = {
+                    "prev_signal_id": prev_sig.get("signal_id"),
+                    "prev_as_of_date": prev_asof,
+                    "is_new_rebalance": is_new_rebalance,
+                    "entered": entered,
+                    "exited": exited,
+                    "kept": kept,
+                    "turnover_buy": turnover_buy,
+                    "turnover_sell": turnover_sell,
+                    "turnover_2way": turnover_2way,
+                    "turnover_1way": turnover_buy,
+                }
+
+            # stale/hold smoothing
+            current_picks = set((meta_base.get("picks_base") or [])[: int(top_k)])
+            pos_nc = [p for p in (positions or []) if str(p.get("code", "")).upper() != "CASH"]
+            denom = float(sum(float(p.get("weight", 0.0) or 0.0) for p in pos_nc))
+            stale = [(str(p.get("code")), float(p.get("weight", 0.0) or 0.0)) for p in pos_nc if str(p.get("code")) not in current_picks]
+            stale_weight = float(sum(w for _c, w in stale))
+            stale_sorted = sorted(stale, key=lambda x: -x[1])[:5]
+            hold_smoothing = {
+                "stale_weight_ratio": 0.0 if denom <= 0 else float(stale_weight / denom),
+                "n_stale_codes": int(len(stale)),
+                "stale_top5": [{"code": c, "weight": w} for c, w in stale_sorted],
+            }
+        except Exception:
+            turnover_attrib = None
+            hold_smoothing = None
+
+        meta_base["turnover_attrib"] = turnover_attrib
+        meta_base["hold_smoothing"] = hold_smoothing
 
         signal_obj: Dict[str, Any] = {
             "signal_id": signal_id,
