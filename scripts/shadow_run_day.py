@@ -61,6 +61,7 @@ def main():
         "scripts/daily_pipeline.py",
         "--date",
         date,
+        "--skip-ingest",
         "--run-hi",
         "--run-signal",
         "--shadow",
@@ -131,14 +132,18 @@ def main():
     # A3 signal succeeded
     a3 = str(sig.get("status")) == "succeeded"
 
+    EPS = 1e-9
+
     # A4 funds conservation: abs(sum(non_cash_weights)+cash-1) <= 1e-9
     positions = sig.get("positions", []) or []
     sw = _sum_weights([p for p in positions if str(p.get("code")).upper() != "CASH"])
-    cw = _cash_weight(sig)
-    a4 = abs((sw + cw) - 1.0) <= 1e-9
+    cw_raw = _cash_weight(sig)
+    # For checks only (do NOT affect trading): tolerate tiny IEEE754 drift.
+    cw_clip = float(min(max(cw_raw, -EPS), 0.6 + EPS))
+    a4 = abs((sw + cw_raw) - 1.0) <= EPS
 
-    # A5 cash range
-    a5 = (0.0 <= cw <= 0.6)
+    # A5 cash range (epsilon-tolerant)
+    a5 = (-EPS <= cw_raw <= 0.6 + EPS)
 
     # A6 sealed date
     sealed_date = (((sig.get("meta", {}) or {}).get("ops", {}) or {}).get("sealed_date"))
@@ -164,7 +169,8 @@ def main():
         "positions_sane": a8,
         "debug": {
             "sum_non_cash_weights": sw,
-            "cash_weight": cw,
+            "cash_weight_raw": cw_raw,
+            "cash_weight_clipped_for_check": cw_clip,
             "sealed_date": sealed_date,
             "health_score_meta": mh.get("health_score"),
             "health_score_cache": hi.get("health_score"),
