@@ -51,6 +51,7 @@ def _cash_weight(sig: dict) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True)
+    ap.add_argument("--skip-ingest", action="store_true", help="backfill/regression only; T-3 should NOT use this")
     args = ap.parse_args()
 
     date = str(args.date)
@@ -61,11 +62,12 @@ def main():
         "scripts/daily_pipeline.py",
         "--date",
         date,
-        "--skip-ingest",
         "--run-hi",
         "--run-signal",
         "--shadow",
     ]
+    if args.skip_ingest:
+        cmd.insert(cmd.index("--run-hi"), "--skip-ingest")
 
     proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
 
