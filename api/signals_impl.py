@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -77,6 +78,7 @@ API_LOG_TAIL = int(os.getenv("QUANTAXIS_API_LOG_TAIL", "2000"))
 
 _baseline_strategy_re = re.compile(r"^(xsec_momentum_weekly_topk|ts_ma_weekly|hybrid_baseline_weekly_topk)$")
 _theme_re = re.compile(r"^[A-Za-z0-9_.-]{1,60}$")
+_sha256_hex_re = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
@@ -94,18 +96,37 @@ def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
     ma_mode = cfg.get("ma_mode", "filter")
     score_mode = cfg.get("score_mode", "baseline")
     min_weight = float(cfg.get("min_weight", 0.0))
+    weight_mode = str(cfg.get("weight_mode", "score")).lower()
+    score_temp = float(cfg.get("score_temp", 0.35))
+    min_trade_weight = float(cfg.get("min_trade_weight", 0.005))
+    max_name_weight = float(cfg.get("max_name_weight", (1.0 / float(max(1, MIN_POS)))))
+    rebalance_trigger_mode = str(cfg.get("rebalance_trigger_mode", "event_only"))
+    rebalance_drift_min_turnover_2way = float(cfg.get("rebalance_drift_min_turnover_2way", 0.03))
+    rebalance_drift_max_cost_bps = float(cfg.get("rebalance_drift_max_cost_bps", 25.0))
 
     # Execution realism (optional)
-    execution_mode = str(cfg.get("execution_mode", "naive"))  # naive|realistic
+    execution_mode = str(cfg.get("execution_mode", "naive"))  # naive|realistic|shadow
     backup_k = int(cfg.get("backup_k", 150))
     limit_tiering = bool(cfg.get("limit_tiering", True))
     limit_pct = float(cfg.get("limit_pct", 0.10))
     limit_price_eps_bps = float(cfg.get("limit_price_eps_bps", 5.0))
     limit_touch_mode = str(cfg.get("limit_touch_mode", "hl"))  # hl|close
     limit_touch_eps = float(cfg.get("limit_touch_eps", 1e-6))
+    aum_cny = float(cfg.get("aum_cny", 20_000_000.0))
+    adv_participation_max = float(cfg.get("adv_participation_max", 0.10))
+    impact_k = float(cfg.get("impact_k", 0.01))
+    impact_alpha = float(cfg.get("impact_alpha", 0.70))
+    impact_liq_floor = float(cfg.get("impact_liq_floor", 1_000_000.0))
+    impact_cost_budget_bps = float(cfg.get("impact_cost_budget_bps", 25.0))
+    fee_bps = float(cfg.get("fee_bps", 8.0))
 
     if not isinstance(strategy, str) or not _baseline_strategy_re.match(strategy):
         raise HTTPException(status_code=400, detail="bad strategy")
+    if not isinstance(cfg.get("data_version_id"), str) or not cfg.get("data_version_id"):
+        raise HTTPException(status_code=400, detail="missing data_version_id")
+    msha = cfg.get("manifest_sha256")
+    if not isinstance(msha, str) or not _sha256_hex_re.match(msha):
+        raise HTTPException(status_code=400, detail="missing or bad manifest_sha256")
     if not isinstance(theme, str) or not _theme_re.match(theme):
         raise HTTPException(status_code=400, detail="bad theme")
     if rebalance != "weekly":
@@ -134,9 +155,23 @@ def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
 
     if not (0.0 <= float(min_weight) <= 1.0):
         raise HTTPException(status_code=400, detail="bad min_weight (0..1)")
+    if weight_mode not in {"equal", "score"}:
+        raise HTTPException(status_code=400, detail="bad weight_mode (equal|score)")
+    if not (0.01 <= float(score_temp) <= 5.0):
+        raise HTTPException(status_code=400, detail="bad score_temp (0.01..5.0)")
+    if not (0.0 <= float(min_trade_weight) <= 0.2):
+        raise HTTPException(status_code=400, detail="bad min_trade_weight (0..0.2)")
+    if not (0.01 <= float(max_name_weight) <= 1.0):
+        raise HTTPException(status_code=400, detail="bad max_name_weight (0.01..1.0)")
+    if rebalance_trigger_mode not in {"event_only", "event_or_drift"}:
+        raise HTTPException(status_code=400, detail="bad rebalance_trigger_mode (event_only|event_or_drift)")
+    if not (0.0 <= rebalance_drift_min_turnover_2way <= 1.0):
+        raise HTTPException(status_code=400, detail="bad rebalance_drift_min_turnover_2way (0..1)")
+    if not (0.0 <= rebalance_drift_max_cost_bps <= 2000.0):
+        raise HTTPException(status_code=400, detail="bad rebalance_drift_max_cost_bps (0..2000)")
 
-    if execution_mode not in {"naive", "realistic"}:
-        raise HTTPException(status_code=400, detail="bad execution_mode (naive|realistic)")
+    if execution_mode not in {"naive", "realistic", "shadow"}:
+        raise HTTPException(status_code=400, detail="bad execution_mode (naive|realistic|shadow)")
     if not isinstance(backup_k, int) or backup_k < 0 or backup_k > 500:
         raise HTTPException(status_code=400, detail="bad backup_k")
     if not (0.0 < limit_pct < 0.5):
@@ -147,6 +182,20 @@ def validate_signal_cfg(cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="bad limit_touch_mode (hl|close)")
     if not (0.0 <= limit_touch_eps <= 0.5):
         raise HTTPException(status_code=400, detail="bad limit_touch_eps")
+    if not (0.0 < aum_cny <= 1e13):
+        raise HTTPException(status_code=400, detail="bad aum_cny (0..1e13)")
+    if not (0.0 <= adv_participation_max <= 1.0):
+        raise HTTPException(status_code=400, detail="bad adv_participation_max (0..1)")
+    if not (0.0 <= impact_k <= 10.0):
+        raise HTTPException(status_code=400, detail="bad impact_k (0..10)")
+    if not (0.1 <= impact_alpha <= 3.0):
+        raise HTTPException(status_code=400, detail="bad impact_alpha (0.1..3)")
+    if not (0.0 <= impact_liq_floor <= 1e13):
+        raise HTTPException(status_code=400, detail="bad impact_liq_floor (0..1e13)")
+    if not (0.0 <= impact_cost_budget_bps <= 2000.0):
+        raise HTTPException(status_code=400, detail="bad impact_cost_budget_bps (0..2000)")
+    if not (0.0 <= fee_bps <= 2000.0):
+        raise HTTPException(status_code=400, detail="bad fee_bps (0..2000)")
 
 
 # ---- helpers copied from api/app.py (signals section) ----
@@ -222,17 +271,33 @@ def _portfolio_to_positions(
 
 
 def _zscore(s: Dict[str, float]) -> Dict[str, float]:
-    vals = [v for v in s.values() if v is not None]
-    if not vals:
-        return {k: 0.0 for k in s.keys()}
-    import math
+    finite_vals: list[float] = []
+    for v in s.values():
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if math.isfinite(fv):
+            finite_vals.append(fv)
 
-    m = sum(vals) / len(vals)
-    var = sum((v - m) ** 2 for v in vals) / max(1, (len(vals) - 1))
+    if not finite_vals:
+        return {k: 0.0 for k in s.keys()}
+
+    m = sum(finite_vals) / len(finite_vals)
+    var = sum((v - m) ** 2 for v in finite_vals) / max(1, (len(finite_vals) - 1))
     sd = math.sqrt(var) if var > 0 else 0.0
     if sd <= 0:
         return {k: 0.0 for k in s.keys()}
-    return {k: (v - m) / sd for k, v in s.items()}
+
+    out: Dict[str, float] = {}
+    for k, v in s.items():
+        try:
+            fv = float(v)
+        except Exception:
+            out[k] = 0.0
+            continue
+        out[k] = ((fv - m) / sd) if math.isfinite(fv) else 0.0
+    return out
 
 
 def _compute_factors_for_codes(as_of_date: str, codes: list[str], cfg: Dict[str, Any]):
@@ -483,6 +548,10 @@ def _run_baseline_backtest_to_workdir(workdir: Path, cfg: Dict[str, Any], strate
     cost_bps = float(cfg.get("cost_bps", 10.0))
     start = str(cfg.get("start", "2019-01-01"))
     end = str(cfg.get("end", "2099-12-31"))
+    snapshot_dir = str(cfg.get("snapshot_dir", "") or "")
+    data_version_id = str(cfg.get("data_version_id", "") or "")
+    manifest_sha256 = str(cfg.get("manifest_sha256", "") or "")
+    require_snapshot = str(cfg.get("require_snapshot", "") or "")
 
     cmd = [
         "python3",
@@ -512,6 +581,14 @@ def _run_baseline_backtest_to_workdir(workdir: Path, cfg: Dict[str, Any], strate
         "--outdir",
         str(workdir),
     ]
+    if snapshot_dir:
+        cmd += ["--snapshot-dir", snapshot_dir]
+    if data_version_id:
+        cmd += ["--data-version-id", data_version_id]
+    if manifest_sha256:
+        cmd += ["--manifest-sha256", manifest_sha256]
+    if require_snapshot:
+        cmd += ["--require-snapshot", require_snapshot]
 
     proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=max(1, API_JOB_TIMEOUT_SEC))
     if proc.returncode != 0:
@@ -636,8 +713,17 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     ma_mode = str(cfg.get("ma_mode", "filter"))
     score_mode = str(cfg.get("score_mode", "baseline"))
     min_weight = float(cfg.get("min_weight", 0.0))
+    weight_mode = str(cfg.get("weight_mode", "score")).lower()
+    score_temp = float(cfg.get("score_temp", 0.35))
+    min_trade_weight = float(cfg.get("min_trade_weight", 0.005))
+    max_name_weight = float(cfg.get("max_name_weight", (1.0 / float(max(1, MIN_POS)))))
+    rebalance_trigger_mode = str(cfg.get("rebalance_trigger_mode", "event_only"))
+    rebalance_drift_min_turnover_2way = float(cfg.get("rebalance_drift_min_turnover_2way", 0.03))
+    rebalance_drift_max_cost_bps_cfg = cfg.get("rebalance_drift_max_cost_bps", None)
     hold_weeks = int(cfg.get("hold_weeks", 2))
     tranche_overlap = bool(cfg.get("tranche_overlap", True))
+    data_version_id = str(cfg.get("data_version_id", "") or "")
+    manifest_sha256 = str(cfg.get("manifest_sha256", "") or "")
 
     # Execution realism
     execution_mode = str(cfg.get("execution_mode", "naive"))
@@ -647,6 +733,16 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     limit_price_eps_bps = float(cfg.get("limit_price_eps_bps", 5.0))
     limit_touch_mode = str(cfg.get("limit_touch_mode", "hl"))
     limit_touch_eps = float(cfg.get("limit_touch_eps", 1e-6))
+    aum_cny = float(cfg.get("aum_cny", 20_000_000.0))
+    adv_participation_max = float(cfg.get("adv_participation_max", 0.10))
+    impact_k = float(cfg.get("impact_k", 0.01))
+    impact_alpha = float(cfg.get("impact_alpha", 0.70))
+    impact_liq_floor = float(cfg.get("impact_liq_floor", 1_000_000.0))
+    impact_cost_budget_bps = float(cfg.get("impact_cost_budget_bps", 25.0))
+    fee_bps = float(cfg.get("fee_bps", 8.0))
+    rebalance_drift_max_cost_bps = (
+        float(impact_cost_budget_bps) if rebalance_drift_max_cost_bps_cfg is None else float(rebalance_drift_max_cost_bps_cfg)
+    )
 
     cfg_used: Dict[str, Any] = dict(cfg)
 
@@ -662,6 +758,269 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
     # Fallback ladder + substitute asset (L3 only)
     fallback_asset = str(cfg.get("fallback_asset", FALLBACK_ASSET_DEFAULT))
     disable_fallback = bool(cfg.get("disable_fallback", False))
+    strategy_key_legacy = f"{strategy}:{theme}:{top_k}:{lookback}:{ma}:{ma_mode}:{score_mode}:{hold_weeks}:{int(tranche_overlap)}"
+
+    # Include execution-sensitive knobs to avoid comparing signals from different parameter regimes.
+    strategy_key = ":".join(
+        [
+            str(strategy),
+            str(theme),
+            str(top_k),
+            str(lookback),
+            str(ma),
+            str(ma_mode),
+            str(score_mode),
+            str(hold_weeks),
+            str(int(tranche_overlap)),
+            str(weight_mode),
+            f"{float(score_temp):.6f}",
+            f"{float(max_name_weight):.6f}",
+            f"{float(min_trade_weight):.6f}",
+            str(rebalance_trigger_mode),
+            f"{float(rebalance_drift_min_turnover_2way):.6f}",
+            f"{float(rebalance_drift_max_cost_bps):.6f}",
+            str(execution_mode),
+            f"{float(adv_participation_max):.6f}",
+            f"{float(impact_k):.6f}",
+            f"{float(impact_alpha):.6f}",
+            f"{float(impact_cost_budget_bps):.6f}",
+        ]
+    )
+
+    def _compat_prev_meta(m: dict) -> bool:
+        # Transitional compatibility: allow one-hop fallback from legacy strategy_key
+        # only when critical execution knobs are equivalent.
+        try:
+            wm = str(m.get("weight_mode", "score")).lower()
+            st = float(m.get("score_temp", 0.35))
+            mnw = float(m.get("max_name_weight", (1.0 / float(max(1, MIN_POS)))))
+            mtw = float(m.get("min_trade_weight", 0.005))
+            rtm = str(m.get("rebalance_trigger_mode", "event_only"))
+            rtt = float(m.get("rebalance_drift_min_turnover_2way", 0.03))
+            rcb = float(m.get("rebalance_drift_max_cost_bps", 25.0))
+            em = str(m.get("execution_mode", "naive"))
+            adv = float(m.get("adv_participation_max", 0.10))
+            ik = float(m.get("impact_k", 0.01))
+            ia = float(m.get("impact_alpha", 0.70))
+            ib = float(m.get("impact_cost_budget_bps", 25.0))
+        except Exception:
+            return False
+        return (
+            wm == str(weight_mode)
+            and abs(st - float(score_temp)) <= 1e-12
+            and abs(mnw - float(max_name_weight)) <= 1e-12
+            and abs(mtw - float(min_trade_weight)) <= 1e-12
+            and rtm == str(rebalance_trigger_mode)
+            and abs(rtt - float(rebalance_drift_min_turnover_2way)) <= 1e-12
+            and abs(rcb - float(rebalance_drift_max_cost_bps)) <= 1e-12
+            and em == str(execution_mode)
+            and abs(adv - float(adv_participation_max)) <= 1e-12
+            and abs(ik - float(impact_k)) <= 1e-12
+            and abs(ia - float(impact_alpha)) <= 1e-12
+            and abs(ib - float(impact_cost_budget_bps)) <= 1e-12
+        )
+
+    def _load_prev_signal_for_strategy(sk: str, sealed_date: str) -> dict | None:
+        import glob
+
+        candidates = []
+        for path in glob.glob(str(SIGNALS_DIR / "*.json")):
+            if path.endswith(".status.json"):
+                continue
+            try:
+                obj = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if obj.get("status") != "succeeded":
+                continue
+            m = obj.get("meta", {}) or {}
+            mkey = str(m.get("strategy_key") or "")
+            if mkey != sk:
+                if not (mkey == strategy_key_legacy and _compat_prev_meta(m)):
+                    continue
+            ops = (m.get("ops", {}) or {})
+            sd = ops.get("sealed_date")
+            if not isinstance(sd, str):
+                continue
+            if sd >= sealed_date:
+                continue
+            candidates.append((sd, int(obj.get("generated_at") or 0), obj))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        return candidates[-1][2]
+
+    def _non_cash_weights(sig_obj: dict) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for p in (sig_obj.get("positions") or []):
+            c = str(p.get("code", "")).upper()
+            if c == "CASH":
+                continue
+            try:
+                w = float(p.get("weight", 0.0) or 0.0)
+            except Exception:
+                w = 0.0
+            if w > 0:
+                out[str(p.get("code"))] = w
+        s = float(sum(max(0.0, float(w)) for w in out.values()))
+        if s > 0:
+            out = {c: float(w) / s for c, w in out.items()}
+        return out
+
+    def _normalize_nonneg_port(wmap: Dict[str, float]) -> Dict[str, float]:
+        s = float(sum(max(0.0, float(v)) for v in wmap.values()))
+        if s <= 0:
+            return {}
+        return {str(c): (max(0.0, float(v)) / s) for c, v in wmap.items() if float(v) > 1e-12}
+
+    def _turnover_2way(prev_w: Dict[str, float], curr_w: Dict[str, float]) -> float:
+        codes = set(prev_w.keys()) | set(curr_w.keys())
+        return float(0.5 * sum(abs(float(curr_w.get(c, 0.0) - prev_w.get(c, 0.0))) for c in codes))
+
+    def _liq20_map(asof: str, codes: set[str]) -> Dict[str, float]:
+        if not codes:
+            return {}
+        out: Dict[str, float] = {}
+        try:
+            fac_u, _lf, _reasons = _compute_factors_for_codes(asof, list(codes), cfg)
+            for c in codes:
+                c6 = str(c).zfill(6)
+                fp = fac_u.get(c6) or fac_u.get(str(c)) or {}
+                try:
+                    lv = float(fp.get("liq_20d", float("nan")))
+                except Exception:
+                    lv = float("nan")
+                if math.isfinite(lv) and lv > 0:
+                    out[str(c)] = lv
+        except Exception:
+            return {}
+        return out
+
+    def _estimate_trade_cost_bps(prev_w: Dict[str, float], curr_w: Dict[str, float], liq_map: Dict[str, float]) -> Dict[str, float]:
+        liq_vals = [float(v) for v in liq_map.values() if math.isfinite(float(v)) and float(v) > 0]
+        liq_proxy = float(sorted(liq_vals)[len(liq_vals) // 2]) if liq_vals else float(max(impact_liq_floor, 1.0))
+        fee_rate = float(max(0.0, fee_bps) / 10000.0)
+
+        traded_notional_cny = 0.0
+        fee_cost_cny = 0.0
+        impact_cost_cny = 0.0
+        for c in set(prev_w.keys()) | set(curr_w.keys()):
+            dw = float(curr_w.get(c, 0.0) - prev_w.get(c, 0.0))
+            t_cny = abs(dw) * float(aum_cny)
+            if t_cny <= 0:
+                continue
+            liq_cny = float(liq_map.get(c, liq_proxy))
+            liq_eff = max(float(impact_liq_floor), liq_cny, 1.0)
+            participation = float(t_cny / liq_eff)
+            imp_rate = float(max(0.0, impact_k) * (participation ** float(max(0.1, impact_alpha))))
+
+            traded_notional_cny += t_cny
+            fee_cost_cny += fee_rate * t_cny
+            impact_cost_cny += imp_rate * t_cny
+
+        total_cost_cny = fee_cost_cny + impact_cost_cny
+        total_cost_bps = (total_cost_cny / float(aum_cny)) * 10000.0 if aum_cny > 0 else 0.0
+        impact_cost_bps = (impact_cost_cny / float(aum_cny)) * 10000.0 if aum_cny > 0 else 0.0
+        fee_cost_bps = (fee_cost_cny / float(aum_cny)) * 10000.0 if aum_cny > 0 else 0.0
+        return {
+            "traded_notional_cny": float(traded_notional_cny),
+            "fee_cost_cny": float(fee_cost_cny),
+            "impact_cost_cny": float(impact_cost_cny),
+            "total_cost_cny": float(total_cost_cny),
+            "fee_cost_bps": float(fee_cost_bps),
+            "impact_cost_bps": float(impact_cost_bps),
+            "total_cost_bps": float(total_cost_bps),
+        }
+
+    def _apply_execution_realism(prev_w: Dict[str, float], target_w: Dict[str, float], asof: str) -> tuple[Dict[str, float], Dict[str, Any]]:
+        codes = set(prev_w.keys()) | set(target_w.keys())
+        if not codes:
+            return target_w, {"enabled": False, "reason": "empty_codes"}
+
+        liq_map = _liq20_map(asof, codes)
+        liq_vals = [float(v) for v in liq_map.values() if math.isfinite(float(v)) and float(v) > 0]
+        liq_proxy = float(sorted(liq_vals)[len(liq_vals) // 2]) if liq_vals else float(max(impact_liq_floor, 1.0))
+
+        filled: Dict[str, float] = {}
+        n_full = 0
+        n_partial = 0
+        n_blocked = 0
+        fill_ratio_sum = 0.0
+        fill_ratio_n = 0
+        for c in codes:
+            wp = float(prev_w.get(c, 0.0))
+            wt = float(target_w.get(c, 0.0))
+            dw = wt - wp
+            if abs(dw) <= 1e-12:
+                w_exec = wp
+                fill = 1.0
+            else:
+                t_cny = abs(dw) * float(aum_cny)
+                liq_cny = float(liq_map.get(c, liq_proxy))
+                cap_cny = float(max(0.0, adv_participation_max) * max(0.0, liq_cny))
+                if t_cny <= 0:
+                    fill = 1.0
+                elif cap_cny <= 0:
+                    fill = 0.0
+                else:
+                    fill = min(1.0, float(cap_cny / t_cny))
+                w_exec = wp + dw * fill
+                if fill <= 1e-12:
+                    n_blocked += 1
+                elif fill < 1.0 - 1e-12:
+                    n_partial += 1
+                else:
+                    n_full += 1
+
+            fill_ratio_sum += float(fill)
+            fill_ratio_n += 1
+            if w_exec > 1e-12:
+                filled[c] = float(w_exec)
+
+        # If clipping leaves gross stock weight >1, scale down to keep long-only no-leverage.
+        s_fill = float(sum(max(0.0, float(w)) for w in filled.values()))
+        if s_fill > 1.0 + 1e-12:
+            filled = {c: (float(w) / s_fill) for c, w in filled.items() if float(w) > 1e-12}
+
+        cost0 = _estimate_trade_cost_bps(prev_w, filled, liq_map)
+        budget_scale = 1.0
+        if float(impact_cost_budget_bps) > 0 and cost0["total_cost_bps"] > float(impact_cost_budget_bps) and prev_w:
+            budget_scale = max(0.0, float(impact_cost_budget_bps) / float(cost0["total_cost_bps"]))
+            scaled: Dict[str, float] = {}
+            for c in codes:
+                wp = float(prev_w.get(c, 0.0))
+                wf = float(filled.get(c, 0.0))
+                ws = wp + (wf - wp) * budget_scale
+                if ws > 1e-12:
+                    scaled[c] = ws
+            s_sc = float(sum(max(0.0, float(w)) for w in scaled.values()))
+            if s_sc > 1.0 + 1e-12:
+                scaled = {c: (float(w) / s_sc) for c, w in scaled.items() if float(w) > 1e-12}
+            filled = scaled
+
+        cost1 = _estimate_trade_cost_bps(prev_w, filled, liq_map)
+        executed_turnover_2way = 0.5 * sum(abs(float(filled.get(c, 0.0) - prev_w.get(c, 0.0))) for c in codes)
+
+        meta = {
+            "enabled": True,
+            "mode": execution_mode,
+            "aum_cny": float(aum_cny),
+            "adv_participation_max": float(adv_participation_max),
+            "impact_k": float(impact_k),
+            "impact_alpha": float(impact_alpha),
+            "impact_liq_floor": float(impact_liq_floor),
+            "impact_cost_budget_bps": float(impact_cost_budget_bps),
+            "fee_bps": float(fee_bps),
+            "codes_n": int(len(codes)),
+            "full_fill_n": int(n_full),
+            "partial_fill_n": int(n_partial),
+            "blocked_fill_n": int(n_blocked),
+            "avg_fill_ratio": float(fill_ratio_sum / max(1, fill_ratio_n)),
+            "budget_scale": float(budget_scale),
+            "executed_turnover_2way": float(executed_turnover_2way),
+            "cost_estimate": cost1,
+        }
+        return filled, meta
 
     try:
         if strategy != "hybrid_baseline_weekly_topk":
@@ -704,6 +1063,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             hard_filter_stats = []
             final_port = {}
             final_scores = {}
+            score_mass: Dict[str, float] = {}
+            weight_mass: Dict[str, float] = {}
 
             for t in range(n_tr):
                 mom_w = mom_tr[t]["weights"] if t < len(mom_tr) else {}
@@ -919,10 +1280,9 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 # We keep selection top_k unchanged, but allocate weights only to the head.
                 k_alloc = min(int(top_k), max(int(MIN_POS) * 2, 12))
                 k_alloc = max(1, min(int(top_k), int(k_alloc)))
-                picks_alloc = picks[:k_alloc]
 
                 # Execution realism (BUY-side): block new buys at up-limit and fill with backups
-                if execution_mode == "realistic" and backups:
+                if execution_mode in {"realistic", "shadow"} and backups:
                     prev_set = set()
                     if t - 1 >= 0 and t - 1 < len(tranche_objs):
                         prev_set = set(tranche_objs[t - 1].get("picks") or [])
@@ -1011,14 +1371,96 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                                 break
                         picks = keep + add
 
-                tranche_port = {c: (1.0 / len(picks_alloc) if picks_alloc else 0.0) for c in picks_alloc}
+                picks_alloc = picks[:k_alloc]
+
+                def _apply_weight_cap(weights: Dict[str, float], cap_in: float) -> Dict[str, float]:
+                    if not weights:
+                        return {}
+                    n = len(weights)
+                    cap = max(float(cap_in), 1.0 / float(max(1, n)))
+                    w = {c: max(0.0, float(v)) for c, v in weights.items()}
+                    s0 = float(sum(w.values()))
+                    if s0 <= 0:
+                        return {}
+                    w = {c: (v / s0) for c, v in w.items()}
+                    for _ in range(8):
+                        clipped = {c: min(v, cap) for c, v in w.items()}
+                        s = float(sum(clipped.values()))
+                        if s <= 0:
+                            return {}
+                        if abs(s - 1.0) <= 1e-12:
+                            return clipped
+                        if s < 1.0:
+                            under = {c: v for c, v in clipped.items() if v < cap - 1e-12}
+                            if not under:
+                                return {c: (v / s) for c, v in clipped.items()}
+                            add = 1.0 - s
+                            su = float(sum(under.values()))
+                            if su <= 0:
+                                add_each = add / float(len(under))
+                                for c in under:
+                                    clipped[c] = clipped[c] + add_each
+                            else:
+                                for c in under:
+                                    clipped[c] = clipped[c] + add * (under[c] / su)
+                            w = clipped
+                            continue
+                        w = {c: (v / s) for c, v in clipped.items()}
+                    sf = float(sum(w.values()))
+                    return {c: (v / sf) for c, v in w.items()} if sf > 0 else {}
+
+                def _alloc_weights(codes: list[str]) -> Dict[str, float]:
+                    if not codes:
+                        return {}
+                    if weight_mode == "equal":
+                        ew = 1.0 / float(len(codes))
+                        return _apply_weight_cap({c: ew for c in codes}, max_name_weight)
+
+                    # Score-driven allocation: softmax over gated scores.
+                    vals = []
+                    for c in codes:
+                        v = float(gated_score(c))
+                        if not math.isfinite(v):
+                            v = 0.0
+                        vals.append(v)
+
+                    if len(set(round(v, 12) for v in vals)) <= 1:
+                        ew = 1.0 / float(len(codes))
+                        return _apply_weight_cap({c: ew for c in codes}, max_name_weight)
+
+                    # Standardize cross-sectional scores first so score_temp is stable
+                    # across dates/levels and not dominated by raw score magnitude drift.
+                    vm = float(sum(vals) / len(vals))
+                    vv = float(sum((v - vm) ** 2 for v in vals) / max(1, len(vals) - 1))
+                    vsd = math.sqrt(vv) if vv > 0 else 0.0
+                    if vsd > 1e-12:
+                        vals = [max(-6.0, min(6.0, (v - vm) / vsd)) for v in vals]
+                    else:
+                        vals = [0.0 for _ in vals]
+
+                    t = max(0.01, float(score_temp))
+                    vmax = max(vals)
+                    exps = [math.exp((v - vmax) / t) for v in vals]
+                    s = float(sum(exps))
+                    if s <= 0:
+                        ew = 1.0 / float(len(codes))
+                        return _apply_weight_cap({c: ew for c in codes}, max_name_weight)
+                    return _apply_weight_cap({c: float(exps[i] / s) for i, c in enumerate(codes)}, max_name_weight)
+
+                tranche_port = _alloc_weights(picks_alloc)
 
                 contrib: Dict[str, float] = {}
                 for c, w in tranche_port.items():
                     dw = scale * w
                     final_port[c] = final_port.get(c, 0.0) + dw
                     contrib[c] = contrib.get(c, 0.0) + dw
-                    final_scores[c] = max(final_scores.get(c, 0.0), scores.get(c, 0.0))
+                    # Keep score information as weighted average across tranche contributions.
+                    # Use the same gated score as ranking/allocation to keep exported score aligned.
+                    gsc = float(gated_score(c))
+                    if not math.isfinite(gsc):
+                        gsc = 0.0
+                    score_mass[c] = score_mass.get(c, 0.0) + dw * gsc
+                    weight_mass[c] = weight_mass.get(c, 0.0) + dw
 
                 tranche_contribs.append(contrib)
                 tranche_objs.append(
@@ -1030,6 +1472,13 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                         "k_alloc": int(k_alloc),
                     }
                 )
+
+            if weight_mass:
+                final_scores = {
+                    c: (float(score_mass.get(c, 0.0)) / float(wm))
+                    for c, wm in weight_mass.items()
+                    if float(wm) > 1e-12
+                }
 
             # --- Ladder evaluation (use effective positions after min_weight) ---
             eff_port = dict(final_port)
@@ -1171,6 +1620,97 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
         if s > 0:
             final_port = {c: float(w) / s for c, w in final_port.items() if float(w) > 0}
 
+        execution_realism_meta = None
+        turnover_trigger_meta = None
+
+        # Turnover trigger:
+        # - event_only: only trade when a new rebalance date appears.
+        # - event_or_drift: allow extra rebalance only when both drift and estimated cost gates pass.
+        # Then apply deadband + execution realism.
+        if final_port:
+            try:
+                sealed_date_for_turnover = str(cfg.get("sealed_date") or as_of_date)
+                prev_sig = _load_prev_signal_for_strategy(strategy_key, sealed_date_for_turnover)
+                if prev_sig is not None:
+                    prev_asof = prev_sig.get("as_of_date")
+                    is_new_rebalance = bool(str(prev_asof) != str(as_of_date))
+                    prev_port = _non_cash_weights(prev_sig)
+                    target_port = _normalize_nonneg_port(final_port)
+                    exec_realism_on = str(execution_mode) in {"realistic", "shadow"}
+
+                    raw_turnover_2way = _turnover_2way(prev_port, target_port)
+                    raw_est_total_cost_bps = None
+                    if exec_realism_on and (prev_port or target_port):
+                        liq_map0 = _liq20_map(as_of_date, set(prev_port.keys()) | set(target_port.keys()))
+                        raw_est_total_cost_bps = float(_estimate_trade_cost_bps(prev_port, target_port, liq_map0)["total_cost_bps"])
+
+                    drift_gate = bool(raw_turnover_2way >= float(rebalance_drift_min_turnover_2way))
+                    cost_gate = bool(
+                        (raw_est_total_cost_bps is None) or (raw_est_total_cost_bps <= float(rebalance_drift_max_cost_bps))
+                    )
+                    should_trade = bool(is_new_rebalance)
+                    trigger_reason = "new_rebalance" if is_new_rebalance else "hold_no_trigger"
+
+                    if (not should_trade) and str(rebalance_trigger_mode) == "event_or_drift" and drift_gate and cost_gate:
+                        should_trade = True
+                        trigger_reason = "drift_and_cost"
+
+                    if should_trade:
+                        if min_trade_weight > 0:
+                            adjusted: Dict[str, float] = {}
+                            for c in sorted(set(prev_port.keys()) | set(target_port.keys())):
+                                w_prev = float(prev_port.get(c, 0.0))
+                                w_new = float(target_port.get(c, 0.0))
+                                if abs(w_new - w_prev) < float(min_trade_weight):
+                                    w_new = w_prev
+                                if w_new > 1e-12:
+                                    adjusted[c] = w_new
+                            target_port = _normalize_nonneg_port(adjusted)
+
+                        post_deadband_turnover_2way = _turnover_2way(prev_port, target_port)
+                        if (not is_new_rebalance) and str(rebalance_trigger_mode) == "event_or_drift":
+                            if post_deadband_turnover_2way < float(rebalance_drift_min_turnover_2way):
+                                should_trade = False
+                                trigger_reason = "drift_below_threshold_after_deadband"
+
+                        if should_trade:
+                            if exec_realism_on and prev_port:
+                                final_port, execution_realism_meta = _apply_execution_realism(prev_port, target_port, as_of_date)
+                            else:
+                                final_port = target_port
+                        else:
+                            final_port = prev_port
+                    else:
+                        final_port = prev_port
+
+                    turnover_trigger_meta = {
+                        "mode": str(rebalance_trigger_mode),
+                        "is_new_rebalance": bool(is_new_rebalance),
+                        "trigger_reason": trigger_reason,
+                        "raw_turnover_2way": float(raw_turnover_2way),
+                        "raw_est_total_cost_bps": (None if raw_est_total_cost_bps is None else float(raw_est_total_cost_bps)),
+                        "drift_min_turnover_2way": float(rebalance_drift_min_turnover_2way),
+                        "drift_max_cost_bps": float(rebalance_drift_max_cost_bps),
+                        "drift_gate": bool(drift_gate),
+                        "cost_gate": bool(cost_gate),
+                        "trade_applied": bool(should_trade),
+                    }
+                else:
+                    turnover_trigger_meta = {
+                        "mode": str(rebalance_trigger_mode),
+                        "is_new_rebalance": None,
+                        "trigger_reason": "no_prev_signal",
+                        "raw_turnover_2way": None,
+                        "raw_est_total_cost_bps": None,
+                        "drift_min_turnover_2way": float(rebalance_drift_min_turnover_2way),
+                        "drift_max_cost_bps": float(rebalance_drift_max_cost_bps),
+                        "drift_gate": None,
+                        "cost_gate": None,
+                        "trade_applied": None,
+                    }
+            except Exception:
+                pass
+
         # --- Health Index v1 integration (ONLY affects overall exposure via cash) ---
         # Does NOT change selection, ranking, factor computation, ladder thresholds, or weights' relative structure.
         health_date = cfg.get("health_date") or as_of_date
@@ -1196,7 +1736,7 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             "theme": theme,
             "top_k": top_k,
             "rebalance": "weekly",
-            "strategy_key": f"{strategy}:{theme}:{top_k}:{lookback}:{ma}:{ma_mode}:{score_mode}:{hold_weeks}:{int(tranche_overlap)}",
+            "strategy_key": strategy_key,
             "picks_base": list(mom_picks) if isinstance(mom_picks, list) else None,
             "min_bars": int(cfg_used.get("min_bars", min_bars)),
             "liq_window": int(cfg_used.get("liq_window", liq_window)),
@@ -1212,13 +1752,29 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
             "score_w_vol_20d": float(cfg.get("score_w_vol_20d", FAC_WEIGHTS["vol_20d"])),
             "score_w_liq_20d": float(cfg.get("score_w_liq_20d", FAC_WEIGHTS["liq_20d"])),
             "min_weight": min_weight,
+            "weight_mode": weight_mode,
+            "score_temp": float(score_temp),
+            "min_trade_weight": float(min_trade_weight),
+            "max_name_weight": float(max_name_weight),
+            "rebalance_trigger_mode": str(rebalance_trigger_mode),
+            "rebalance_drift_min_turnover_2way": float(rebalance_drift_min_turnover_2way),
+            "rebalance_drift_max_cost_bps": float(rebalance_drift_max_cost_bps),
+            "turnover_trigger": turnover_trigger_meta,
             "execution_mode": execution_mode,
+            "execution_realism": execution_realism_meta,
             "backup_k": backup_k,
             "limit_tiering": limit_tiering,
             "limit_pct": limit_pct,
             "limit_price_eps_bps": limit_price_eps_bps,
             "limit_touch_mode": limit_touch_mode,
             "limit_touch_eps": limit_touch_eps,
+            "aum_cny": float(aum_cny),
+            "adv_participation_max": float(adv_participation_max),
+            "impact_k": float(impact_k),
+            "impact_alpha": float(impact_alpha),
+            "impact_liq_floor": float(impact_liq_floor),
+            "impact_cost_budget_bps": float(impact_cost_budget_bps),
+            "fee_bps": float(fee_bps),
             "auto_relax": stats.get("auto_relax") if isinstance(stats, dict) else None,
             "hard_filters": {
                 "vol_20d_max": hard_vol_20d_max,
@@ -1250,6 +1806,8 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 "sealed_date": sealed_date_for_ops,
                 "sealed_ok": True,
             },
+            "data_version_id": data_version_id,
+            "manifest_sha256": manifest_sha256,
             "hold_weeks": hold_weeks,
             "tranche_overlap": tranche_overlap,
             "tranches": tranche_objs,
@@ -1307,8 +1865,10 @@ def run_signal(signal_id: str, cfg: Dict[str, Any]) -> None:
                 if obj.get("status") != "succeeded":
                     continue
                 m = obj.get("meta", {}) or {}
-                if m.get("strategy_key") != strategy_key:
-                    continue
+                mkey = str(m.get("strategy_key") or "")
+                if mkey != str(strategy_key):
+                    if not (mkey == strategy_key_legacy and _compat_prev_meta(m)):
+                        continue
                 ops = (m.get("ops", {}) or {})
                 sd = ops.get("sealed_date")
                 if not isinstance(sd, str):

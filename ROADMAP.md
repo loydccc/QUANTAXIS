@@ -1,74 +1,53 @@
-# QUANTAXIS API – Roadmap / Milestones
+# QUANTAXIS Roadmap v2 (as of 2026-02-28)
 
-> Goal: productize a small local HTTP API around QUANTAXIS so we can **read artifacts**, **execute backtests**, and (Mode C) generate **high-win-rate oriented** stock selection signals safely.
+> Goal: run a **reproducible, auditable, high-win-rate-oriented** signal system that is safe in daily operations before scaling live capital.
 
-## Milestone 0 — Repo hygiene / baseline
-- [x] `.gitignore` excludes `output/` and other generated artifacts (keep only latest aggregates)
-- [x] Basic run docs / quickstart (API README updated)
+## 0) Why v2
+- Old roadmap was last updated on 2026-02-04 and under-represented later ops work.
+- This v2 reflects actual progress after introducing daily pipeline, shadow run, health exposure, and alerting.
 
-## Milestone 1 — Mode A (read-only API)
-- [x] `GET /health`
-- [x] `GET /latest/manifest`
-- [x] `GET /reports/{run_id}/manifest`
-- [x] `GET /reports/{run_id}/file/{name}` (basic filename allowlist)
+## 1) Completed Foundation (Mode A/B/C baseline)
+- [x] Repo hygiene and artifact policy (`output/` ignore + latest aggregates)
+- [x] Read-only API (`/health`, `/latest/manifest`, `/reports/...`)
+- [x] Execute API (`POST /run`, `GET /runs/{job_id}`) and run metadata persistence
+- [x] Optional token auth (`QUANTAXIS_API_TOKEN`, `X-API-Key`)
+- [x] Signals API (`POST /signals/run`, `GET /signals/{id}`, CSV endpoints)
+- [x] Hybrid weekly signal baseline (momentum + MA, weekly rebalance, topK)
+- [x] Factor score mode and attribution exports
+- [x] 2-tranche overlap (2-week hold smoothing)
 
-## Milestone 2 — Mode B (execute API) + job tracking
-- [x] `POST /run` triggers `scripts/run_from_cfg.py` in background
-- [x] `GET /runs/{job_id}` returns status/result
-- [x] Persist run metadata under `output/api_runs/`
+## 2) Completed Operational Shift (post-2026-02-04)
+- [x] Production daily pipeline: `ingest -> validate -> seal -> HI -> signal`
+- [x] Degradation rule: if `sealed_ok=false`, force `HOLD_PREV`
+- [x] Shadow-run single-day entrypoint with assertions and fixed output contract
+- [x] Signal ladder L0-L3 with fallback asset flow
+- [x] Health exposure integration via cash scaling (`exposure = clip(health_score, 0.4, 1.0)`)
+- [x] Observability fields in signal meta (`turnover_attrib`, `hold_smoothing`, `ops`)
+- [x] Operational alerts evaluator and weekly turnover report
+- [x] Runbook/freeze/alerts/checklist docs for pre-prod operation
 
-## Milestone 3 — Minimal security baseline (optional token auth)
-- [x] Env var `QUANTAXIS_API_TOKEN`
-- [x] If set, require header `X-API-Key` for:
-  - `POST /run`
-  - `GET /runs/{job_id}`
-- [x] `/health` includes `auth_required: true/false`
+## 3) P0 — Production Correctness (must finish before scaling)
+- [x] Fix `/run` hardening refactor regression (`rate_limit_run`/`redact_text` symbols)
+- [x] Integrate alert severity into shadow pass/fail gate (error alert must fail the day)
+- [x] Fix daily HI scoring method to use robust history-based ranking (not single-point rank)
+- [x] Add watchdog cleanup for stale `running` statuses in signals/jobs
+- [x] Unify reproducibility contract between `/run` and `run_signal` (data version fingerprints)
+- [x] Add API regression checks that cover `/run` and `/runs/{job_id}` (not only import + `/health`)
 
-## Milestone 4 — Hardening (next)
-- [ ] Decide policy for `/health` (keep open vs require auth when token set)
-- [ ] Rate limit (simple in-memory) on `/run` and `/runs/*`
-- [ ] IP allowlist (optional)
-- [ ] Safer run execution (timeout, max concurrent jobs, sanitized config)
-- [ ] Log redaction / avoid returning sensitive stdout/stderr
+## 4) P1 — Ops Hardening and Release Gate (next 2-4 weeks)
+- [ ] Define explicit go/no-go checklist for live switch (shadow streak, alert streak, data seal streak)
+- [ ] Add structured logs for pipeline/shadow/alerts with stable fields
+- [ ] Add small SLO dashboard inputs: seal success rate, shadow pass rate, alert counts
+- [ ] Decide `/health` auth policy and document external exposure policy
+- [ ] Add CI job for core scripts (`daily_pipeline`, `shadow_run_day`, `alerts_eval`)
 
-## Milestone 5 — Packaging / Ops
-- [ ] Dockerfile / compose
-- [ ] Proper config management (Pydantic settings)
-- [ ] Structured logging
-- [ ] Tests for auth + path traversal
+## 5) P2 — Research Iteration on Top of Stable Ops
+- [ ] Freeze and version a factor computation contract (winsorize/zscore/missing/neutralization switches)
+- [ ] Expand factor pack toward 8-12 with grouped purpose tags (trend/reversal/flow/risk)
+- [ ] Standardize factor evaluation outputs (RankIC, spread, decay, corr, turnover sensitivity)
+- [ ] Establish walk-forward promotion rule: only promote configs passing OOS and ops constraints
+- [ ] Add portfolio constraints pack (liquidity cap, single-name cap, sector cap, cost model)
 
-## Milestone 6 — Mode C (Signals) — baseline weekly topK (manual trading)
-> Goal: produce a **weekly “what to buy” list** (JSON + CSV) for manual execution, optimized for **high win rate** and stability (not just backtest CAGR).
-
-Phase 6.1 (baseline → workflow)
-- [x] Add signal job store under `output/signals/`
-- [ ] Universe expansion: add market-segment themes
-  - `hs10`: 沪深主板 10%（暂不含北交所/新三板；排除创业板/科创板）
-  - `cyb20`: 创业板 20%（300/301；暂不含北交所/新三板）
-  - `a_ex_kcb_bse`: 沪深主板 + 创业板（仅排除科创板 688 与北交所/新三板）
-- [x] Define signal artifact schema (JSON) + CSV export
-  - required: `as_of_date`, `strategy`, `theme`, `top_k`, `rebalance`, `positions[] (code, weight, rank, score)`
-  - include: version fingerprints (`meta.config_signature`, `meta.universe_fingerprint`, `meta.universe_size`)
-  - optional: factor attribution (`positions[].factors`, `positions[].zfactors`) and tranche debug info (`meta.tranches`)
-- [x] Add API endpoints:
-  - `POST /signals/run` → returns `signal_id` (async)
-  - `GET /signals/{signal_id}` → returns JSON (or status while running)
-  - `GET /signals/{signal_id}.csv` → returns CSV
-  - `GET /signals/{signal_id}_factors.csv` → returns factor attribution CSV
-- [x] Implement generator for **baseline strategies** (momentum / MA) with **weekly rebalance** and **equal-weight topK**
-
-Phase 6.2 (lightweight score → hybrid “c”)
-- [x] Add a lightweight score/rank aggregator (normalize 1–2 baseline signals into a score)
-- [x] Export `score` and stable tie-break rules
-- [x] (Optional) Add 2-tranche overlap for 2-week hold (weekly rebalance, hold 2 weeks)
-
-Phase 6.3 (factor system path → toward “b”)
-- [ ] Add factor plan + computation contract (winsorize/zscore/missing; optional neutralization)
-- [ ] Implement initial 8–12 factors (grouped: momentum, reversal, flow, risk+tradability)
-- [x] Extend score to support factor-based ranking (multi-factor)  # (already in API: score_mode=factor)
-- [ ] **Factor evaluation fixed outputs** (RankIC, stratified/decile returns, decay, correlations)
-  - [ ] Baseline report for current factor pack (ret_10d/ret_20d/vol_20d/liq_20d) on `theme=a_ex_kcb_bse`
-  - [ ] Use report to propose tuned weights / factor set changes
-  - [ ] Re-run signals + walk-forward validation after each change
-- [ ] Portfolio constraints fixed (liquidity, single-name cap, sector cap, cost model)
-- [ ] Plug factor eval outputs / factor-bt signals as optional inputs
+## 6) Scope Notes
+- This roadmap prioritizes **production correctness first**, then research improvements.
+- No parameter tweaking for performance should bypass freeze/runbook/alert gates.

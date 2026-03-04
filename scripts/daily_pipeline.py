@@ -23,6 +23,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return float(default)
+    return float(v)
+
+
+def _env_str(name: str, default: str) -> str:
+    v = os.getenv(name)
+    if v is None:
+        return str(default)
+    s = str(v).strip()
+    return s if s else str(default)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True, help="YYYY-MM-DD")
@@ -81,6 +96,7 @@ def main():
         from api.signals_impl import run_signal
 
         signal_id = f"prod_signal_{args.date.replace('-', '')}_{int(time.time())}"
+        data_etag = str((sealed_doc or {}).get("etag") or obj.get("etag") or "")
         cfg = {
             "strategy": "hybrid_baseline_weekly_topk",
             "shadow": bool(args.shadow),
@@ -97,13 +113,35 @@ def main():
             "ma_mode": "filter",
             "score_mode": "factor",
             "min_weight": 0.04,
+            "score_temp": _env_float("QUANTAXIS_SCORE_TEMP", 0.35),
+            "max_name_weight": _env_float("QUANTAXIS_MAX_NAME_WEIGHT", 1.0 / 6.0),
+            "min_trade_weight": _env_float("QUANTAXIS_MIN_TRADE_WEIGHT", 0.005),
+            "rebalance_trigger_mode": _env_str("QUANTAXIS_REBALANCE_TRIGGER_MODE", "event_only"),
+            "rebalance_drift_min_turnover_2way": _env_float("QUANTAXIS_REBALANCE_DRIFT_MIN_TURNOVER_2WAY", 0.03),
+            "rebalance_drift_max_cost_bps": _env_float("QUANTAXIS_REBALANCE_DRIFT_MAX_COST_BPS", 25.0),
             "hard_dist_252h_min": -0.4,
             "hard_downvol_q": 0.70,
+            "aum_cny": _env_float("QUANTAXIS_AUM_CNY", 200_000_000.0),
+            "adv_participation_max": _env_float("QUANTAXIS_ADV_PARTICIPATION_MAX", 0.02),
+            "impact_k": _env_float("QUANTAXIS_IMPACT_K", 0.01),
+            "impact_alpha": _env_float("QUANTAXIS_IMPACT_ALPHA", 0.70),
+            "impact_liq_floor": _env_float("QUANTAXIS_IMPACT_LIQ_FLOOR", 1_000_000.0),
+            "impact_cost_budget_bps": _env_float("QUANTAXIS_IMPACT_COST_BUDGET_BPS", 25.0),
+            "fee_bps": _env_float("QUANTAXIS_FEE_BPS", 8.0),
+            "score_w_ret_20d": _env_float("QUANTAXIS_SCORE_W_RET_20D", 1.0),
+            "score_w_ret_10d": _env_float("QUANTAXIS_SCORE_W_RET_10D", 0.5),
+            "score_w_ret_5d": _env_float("QUANTAXIS_SCORE_W_RET_5D", 0.2),
+            "score_w_ma_60d": _env_float("QUANTAXIS_SCORE_W_MA_60D", 0.2),
+            "score_w_vol_20d": _env_float("QUANTAXIS_SCORE_W_VOL_20D", -0.5),
+            "score_w_liq_20d": _env_float("QUANTAXIS_SCORE_W_LIQ_20D", 0.2),
             "fallback_asset": "510300",
             "start": "2019-01-01",
             "end": args.date,
             "health_date": args.date,
             "sealed_date": args.date,
+            # Unified reproducibility contract with /run.
+            "data_version_id": f"ops_data_status@{args.date}",
+            "manifest_sha256": data_etag,
         }
         run_signal(signal_id, cfg)
 

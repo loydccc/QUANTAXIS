@@ -48,10 +48,105 @@ def _cash_weight(sig: dict) -> float:
     return 0.0
 
 
+def _safe_float(v) -> float | None:
+    try:
+        fv = float(v)
+    except Exception:
+        return None
+    if math.isfinite(fv):
+        return fv
+    return None
+
+
+def _eval_alerts_for_date(date: str) -> tuple[dict, bool]:
+    """Run alerts_eval.py for date and return (meta, gate_ok).
+
+    gate_ok is True only when:
+    - alerts evaluator executed successfully (exit 0 or 2), and
+    - there is no ERROR-level alert.
+    """
+    cmd = ["python3", "scripts/alerts_eval.py", "--date", date]
+    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    stdout_tail = (proc.stdout or "").strip().splitlines()[-1] if (proc.stdout or "").strip() else ""
+    stderr_tail = (proc.stderr or "").strip().splitlines()[-1] if (proc.stderr or "").strip() else ""
+
+    parsed = None
+    parse_error = None
+    if stdout_tail:
+        try:
+            parsed = json.loads(stdout_tail)
+        except Exception as e:
+            parse_error = repr(e)
+
+    alerts = (parsed or {}).get("alerts") if isinstance(parsed, dict) else []
+    if not isinstance(alerts, list):
+        alerts = []
+    has_error_alert = any((isinstance(a, dict) and a.get("severity") == "error") for a in alerts)
+
+    eval_ok = proc.returncode in (0, 2)
+    gate_ok = bool(eval_ok and (parse_error is None) and (not has_error_alert))
+
+    meta = {
+        "date": date,
+        "returncode": int(proc.returncode),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "result": parsed,
+        "parse_error": parse_error,
+        "has_error_alert": bool(has_error_alert),
+        "n_alerts": int((parsed or {}).get("n_alerts", 0)) if isinstance(parsed, dict) else 0,
+    }
+    return meta, gate_ok
+
+
+def _build_paper_pnl_ledger(date: str, args) -> dict:
+    """Build/update paper PnL ledger up to `date` (non-gating observability)."""
+    cmd = [
+        "python3",
+        "scripts/build_paper_pnl_ledger.py",
+        "--end-date",
+        str(date),
+        "--mongo-host",
+        str(args.mongo_host),
+        "--mongo-port",
+        str(args.mongo_port),
+        "--mongo-db",
+        str(args.mongo_db),
+        "--mongo-user",
+        str(args.mongo_user),
+        "--mongo-password",
+        str(args.mongo_password),
+    ]
+    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    stdout_tail = (proc.stdout or "").strip().splitlines()[-1] if (proc.stdout or "").strip() else ""
+    stderr_tail = (proc.stderr or "").strip().splitlines()[-1] if (proc.stderr or "").strip() else ""
+    parsed = None
+    parse_error = None
+    if stdout_tail:
+        try:
+            parsed = json.loads(stdout_tail)
+        except Exception as e:
+            parse_error = repr(e)
+    return {
+        "date": str(date),
+        "returncode": int(proc.returncode),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "result": parsed,
+        "parse_error": parse_error,
+        "ok": bool(proc.returncode == 0 and isinstance(parsed, dict) and parsed.get("ok") is True),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True)
     ap.add_argument("--skip-ingest", action="store_true", help="backfill/regression only; T-3 should NOT use this")
+    ap.add_argument("--mongo-host", default=os.getenv("MONGODB_HOST", "127.0.0.1"))
+    ap.add_argument("--mongo-port", default=os.getenv("MONGODB_PORT", "27017"))
+    ap.add_argument("--mongo-db", default=os.getenv("MONGODB_DATABASE", "quantaxis"))
+    ap.add_argument("--mongo-user", default=os.getenv("MONGODB_USER", "quantaxis"))
+    ap.add_argument("--mongo-password", default=os.getenv("MONGODB_PASSWORD", "quantaxis"))
     args = ap.parse_args()
 
     date = str(args.date)
@@ -62,6 +157,16 @@ def main():
         "scripts/daily_pipeline.py",
         "--date",
         date,
+        "--mongo-host",
+        str(args.mongo_host),
+        "--mongo-port",
+        str(args.mongo_port),
+        "--mongo-db",
+        str(args.mongo_db),
+        "--mongo-user",
+        str(args.mongo_user),
+        "--mongo-password",
+        str(args.mongo_password),
         "--run-hi",
         "--run-signal",
         "--shadow",
@@ -162,13 +267,26 @@ def main():
     # A8 position sanity
     any_neg = any(float(p.get("weight", 0.0)) < 0 for p in positions)
     a8 = (len(positions) >= MIN_POS) and (not any_neg)
+    a8_pos_n = len(positions) >= MIN_POS
+
+    # A9 score_not_all_zero (non-cash only)
+    non_cash = [p for p in positions if str(p.get("code", "")).upper() != "CASH"]
+    score_vals = []
+    for p in non_cash:
+        fv = _safe_float(p.get("score"))
+        if fv is not None:
+            score_vals.append(fv)
+    score_abs_sum = float(sum(abs(x) for x in score_vals))
+    a9 = bool(score_vals) and (score_abs_sum > 1e-12)
 
     report["assertions"] = {
         "funds_conservation": a4,
         "cash_weight_in_range": a5,
         "meta_ops_sealed_date_match": a6,
         "meta_health_matches_cache": a7,
+        "positions_n_ge_min": a8_pos_n,
         "positions_sane": a8,
+        "scores_not_all_zero": a9,
         "debug": {
             "sum_non_cash_weights": sw,
             "cash_weight_raw": cw_raw,
@@ -177,10 +295,25 @@ def main():
             "health_score_meta": mh.get("health_score"),
             "health_score_cache": hi.get("health_score"),
             "positions_n": len(positions),
+            "score_items_n": len(score_vals),
+            "score_abs_sum": score_abs_sum,
             "signal_status": sig.get("status"),
             "n_components_used": hi.get("n_components_used"),
         },
     }
+
+    # Paper PnL ledger (non-gating; observability only)
+    try:
+        pnl_meta = _build_paper_pnl_ledger(date, args)
+        report["paper_pnl"] = pnl_meta
+        pnl_res = pnl_meta.get("result") if isinstance(pnl_meta, dict) else None
+        if isinstance(pnl_res, dict):
+            if pnl_res.get("csv"):
+                report["artifacts"]["paper_pnl_csv"] = str(pnl_res.get("csv"))
+            if pnl_res.get("json"):
+                report["artifacts"]["paper_pnl_json"] = str(pnl_res.get("json"))
+    except Exception as e:
+        report["paper_pnl"] = {"ok": False, "error": repr(e)}
 
     # Observability (meta-only)
     try:
@@ -228,15 +361,26 @@ def main():
 
     sealed_ok = a1
     signal_ok = a3
-    assertions_ok = all([a4, a5, a6, a7, a8])
-    ok = bool(sealed_ok and a2 and signal_ok and assertions_ok)
-    report["ok"] = ok
+    assertions_ok = all([a4, a5, a6, a7, a8, a9])
+    core_ok = bool(sealed_ok and a2 and signal_ok and assertions_ok)
+    report["ok"] = core_ok
+    report["core_ok"] = core_ok
     report["sealed_ok"] = sealed_ok
     report["signal_ok"] = signal_ok
     report["assertions_ok"] = assertions_ok
     report["alerts_sent"] = False
 
-    (REPORT_DIR / f"{date}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Persist base report first so alerts_eval can consume same-day report.
+    out_path = REPORT_DIR / f"{date}.json"
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    alerts_meta, alerts_gate_ok = _eval_alerts_for_date(date)
+    report["alerts_eval"] = alerts_meta
+    report["alerts_gate_ok"] = bool(alerts_gate_ok)
+
+    ok = bool(core_ok and alerts_gate_ok)
+    report["ok"] = ok
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Spec: stdout one-line JSON
     print(

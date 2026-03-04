@@ -84,7 +84,7 @@ export QUANTAXIS_API_INCLUDE_LOGS=false
 
 Generate a weekly **equal-weight topK** signal (manual trading workflow).
 
-- `POST /signals/run` (JSON body)
+- `POST /signals/run` (JSON body; requires `data_version_id` + `manifest_sha256`)
 - `GET /signals/{signal_id}` (JSON)
 - `GET /signals/{signal_id}.csv` (CSV)
 - `GET /signals/{signal_id}_factors.csv` (CSV with factor attribution)
@@ -95,7 +95,7 @@ Example (baseline momentum):
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"xsec_momentum_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0}' \
+  -d '{"strategy":"xsec_momentum_weekly_topk","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"data_version_id":"qa_cn_stock_daily@2026-02-28","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
   http://127.0.0.1:8000/signals/run
 ```
 
@@ -105,7 +105,7 @@ Example (hybrid c: momentum + MA **hard filter**; default). Add `score_mode:"fac
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","score_mode":"factor","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"filter","score_mode":"factor","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true,"data_version_id":"qa_cn_stock_daily@2026-02-28","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
   http://127.0.0.1:8000/signals/run
 ```
 
@@ -115,7 +115,7 @@ Example (hybrid c: momentum + MA **soft boost**):
 curl -s \
   -H "X-API-Key: your-secret" \
   -H "Content-Type: application/json" \
-  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"boost","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true}' \
+  -d '{"strategy":"hybrid_baseline_weekly_topk","ma_mode":"boost","theme":"all","rebalance":"weekly","top_k":10,"min_bars":800,"liq_window":20,"liq_min_ratio":1.0,"hold_weeks":2,"tranche_overlap":true,"data_version_id":"qa_cn_stock_daily@2026-02-28","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
   http://127.0.0.1:8000/signals/run
 ```
 

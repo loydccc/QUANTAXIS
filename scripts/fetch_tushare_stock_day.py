@@ -99,6 +99,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--limit", type=int, default=200, help="limit number of symbols (when --codes not given)")
     ap.add_argument("--sleep", type=float, default=0.15, help="sleep between API calls")
     ap.add_argument("--batch", type=int, default=1, help="codes per request; keep 1 for stability")
+    ap.add_argument(
+        "--by-trade-date",
+        action="store_true",
+        help="FAST PATH: fetch using pro.daily(trade_date=YYYYMMDD) once (requires start=end). Ignores stock_list/code batching; applies --theme filter on returned rows.",
+    )
     args = ap.parse_args(argv)
 
     token = os.getenv("TUSHARE_TOKEN")
@@ -189,6 +194,75 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 4
 
     print(f"[tushare] codes={len(codes)} start={args.start} end={args.end}")
+
+    # FAST PATH: one request per trading day.
+    # Tushare supports pro.daily(trade_date=YYYYMMDD) which returns all stocks for that date.
+    # This is orders-of-magnitude faster than iterating thousands of symbols.
+    if args.by_trade_date:
+        if args.start != args.end:
+            print("ERROR: --by-trade-date requires --start == --end (single day)", file=sys.stderr)
+            return 2
+        trade_date = str(args.start)
+        try:
+            df = pro.daily(trade_date=trade_date)
+        except Exception as e:
+            print(f"ERROR: pro.daily(trade_date={trade_date}) failed: {e}", file=sys.stderr)
+            return 4
+
+        if df is None or df.empty:
+            print(f"[tushare] trade_date={trade_date}: no data")
+            return 0
+
+        # Optional theme filter
+        if args.theme:
+            keep = []
+            for tsc in df.get("ts_code", []):
+                code6 = str(tsc).split(".")[0].zfill(6)
+                keep.append(_theme_ok(code6, args.theme))
+            df = df[keep]
+
+        cfg = _get_mongo_cfg()
+        client = _mongo_client(cfg)
+        db = client[cfg.db]
+        coll = db["stock_day"]
+        _ensure_indexes(coll)
+
+        records = []
+        now = int(time.time())
+        for r in df.to_dict("records"):
+            ts_code = r.get("ts_code")
+            base_code = ts_code.split(".")[0] if isinstance(ts_code, str) and ts_code else None
+            td = str(r.get("trade_date") or "")
+            date_iso = f"{td[0:4]}-{td[4:6]}-{td[6:8]}" if (len(td) == 8 and td.isdigit()) else td
+            records.append(
+                {
+                    "code": base_code or ts_code,
+                    "ts_code": ts_code,
+                    "date": date_iso,
+                    "open": r.get("open"),
+                    "high": r.get("high"),
+                    "low": r.get("low"),
+                    "close": r.get("close"),
+                    "pre_close": r.get("pre_close"),
+                    "change": r.get("change"),
+                    "pct_chg": r.get("pct_chg"),
+                    "vol": r.get("vol"),
+                    "amount": r.get("amount"),
+                    "source": "tushare",
+                    "updated_at": now,
+                }
+            )
+
+        ops = [
+            pymongo.UpdateOne({"code": rec["code"], "date": rec["date"]}, {"$set": rec}, upsert=True)
+            for rec in records
+        ]
+        res = coll.bulk_write(ops, ordered=False)
+        print(
+            f"[mongo] trade_date={trade_date}: bars={len(records)} upserted={res.upserted_count} modified={res.modified_count} matched={res.matched_count}"
+        )
+        print(f"DONE: total_rows={len(records)} total_upserted={res.upserted_count or 0}")
+        return 0
 
     cfg = _get_mongo_cfg()
     client = _mongo_client(cfg)

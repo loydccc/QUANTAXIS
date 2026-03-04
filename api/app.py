@@ -15,12 +15,10 @@ import json
 import os
 import subprocess
 import re
-import threading
 import time
 import uuid
-from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -28,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 
 from api.core import REPORTS_DIR, RUNS_DIR, SIGNALS_DIR, read_json, redact_text
-from api.security import require_token, rate_limit_run, validate_cfg_envelope
+from api.security import require_token, rate_limit_run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,8 +169,8 @@ def run_job(job_id: str, cfg: Dict[str, Any]) -> None:
             "return_code": rc,
             "result": result_obj,
             # store tails for troubleshooting (optionally served by API)
-            "stdout_tail": _redact_text(stdout_tail),
-            "stderr_tail": _redact_text(stderr_tail),
+            "stdout_tail": redact_text(stdout_tail),
+            "stderr_tail": redact_text(stderr_tail),
         }
         job_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -337,7 +335,7 @@ def report_file(run_id: str, name: str):
 @app.post("/run")
 def run(cfg: Dict[str, Any], background: BackgroundTasks, request: Request):
     require_token(request)
-    _rate_limit_run(request)
+    rate_limit_run(request)
     _validate_cfg(cfg)
 
     # concurrency guard
